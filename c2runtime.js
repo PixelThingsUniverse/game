@@ -15113,3119 +15113,325 @@ cr.system_object.prototype.loadFromJSON = function (o)
 	};
 })();
 cr.shaders = {};
-cr.shaders["radialblur"] = {src: ["precision mediump float;",
-"varying vec2 vTex;",
-"uniform sampler2D samplerFront;",
-"uniform float pixelWidth;",
-"uniform float pixelHeight;",
-"uniform float intensity;",
-"uniform float radius;",
-"void main(void)",
-"{",
-"vec2 dir = 0.5 - vTex;",
-"float dist = sqrt(dir.x*dir.x + dir.y*dir.y);",
-"dir = dir/dist;",
-"vec4 front = texture2D(samplerFront, vTex);",
-"vec4 sum = front;",
-"sum += texture2D(samplerFront, vTex + dir * -0.08 * radius);",
-"sum += texture2D(samplerFront, vTex + dir * -0.05 * radius);",
-"sum += texture2D(samplerFront, vTex + dir * -0.03 * radius);",
-"sum += texture2D(samplerFront, vTex + dir * -0.02 * radius);",
-"sum += texture2D(samplerFront, vTex + dir * -0.01 * radius);",
-"sum += texture2D(samplerFront, vTex + dir * 0.01 * radius);",
-"sum += texture2D(samplerFront, vTex + dir * 0.02 * radius);",
-"sum += texture2D(samplerFront, vTex + dir * 0.03 * radius);",
-"sum += texture2D(samplerFront, vTex + dir * 0.05 * radius);",
-"sum += texture2D(samplerFront, vTex + dir * 0.08 * radius);",
-"sum /= 11.0;",
-"float t = dist * 2.2;",
-"t = clamp(t, 0.0, 1.0);",
-"gl_FragColor = mix(front, mix(front, sum, t), intensity);",
-"}"
-].join("\n"),
-	extendBoxHorizontal: 32,
-	extendBoxVertical: 32,
-	crossSampling: false,
-	preservesOpaqueness: false,
-	animated: false,
-	parameters: [["radius", 0, 1], ["intensity", 0, 1]] }
-cr.shaders["skew"] = {src: ["varying mediump vec2 vTex;",
-"uniform lowp sampler2D samplerFront;",
-"uniform lowp float pixelWidth;",
-"uniform lowp float pixelHeight;",
-"uniform mediump float skew;",
-"void main(void)",
-"{",
-"mediump vec2 tex = vTex;",
-"tex.y -= (pixelHeight*skew)*tex.x;",
-"gl_FragColor = texture2D(samplerFront,tex);",
-"}"
-].join("\n"),
-	extendBoxHorizontal: 0,
-	extendBoxVertical: 0,
-	crossSampling: false,
-	preservesOpaqueness: false,
-	animated: false,
-	parameters: [["skew", 0, 0]] }
 ;
 ;
-cr.plugins_.Audio = function(runtime)
+cr.plugins_.MagiCam = function(runtime)
 {
 	this.runtime = runtime;
 };
 (function ()
 {
-	var pluginProto = cr.plugins_.Audio.prototype;
-	pluginProto.Type = function(plugin)
+	var CMath = {};
+	CMath.lerp = function(a, b, x)
 	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
+		return a + (b - a) * x;
 	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
+	CMath.cubic = function(a, b, c, d, x)
 	{
-	};
-	var audRuntime = null;
-	var audInst = null;
-	var audTag = "";
-	var appPath = "";			// for Cordova only
-	var API_HTML5 = 0;
-	var API_WEBAUDIO = 1;
-	var API_CORDOVA = 2;
-	var API_APPMOBI = 3;
-	var api = API_HTML5;
-	var context = null;
-	var audioBuffers = [];		// cache of buffers
-	var audioInstances = [];	// cache of instances
-	var lastAudio = null;
-	var useOgg = false;			// determined at create time
-	var timescale_mode = 0;
-	var silent = false;
-	var masterVolume = 1;
-	var listenerX = 0;
-	var listenerY = 0;
-	var isContextSuspended = false;
-	var panningModel = 1;		// HRTF
-	var distanceModel = 1;		// Inverse
-	var refDistance = 10;
-	var maxDistance = 10000;
-	var rolloffFactor = 1;
-	var micSource = null;
-	var micTag = "";
-	var isMusicWorkaround = false;
-	var musicPlayNextTouch = [];
-	var playMusicAsSoundWorkaround = false;		// play music tracks with Web Audio API
-	function dbToLinear(x)
-	{
-		var v = dbToLinear_nocap(x);
-		if (!isFinite(v))	// accidentally passing a string can result in NaN; set volume to 0 if so
-			v = 0;
-		if (v < 0)
-			v = 0;
-		if (v > 1)
-			v = 1;
-		return v;
-	};
-	function linearToDb(x)
-	{
-		if (x < 0)
-			x = 0;
-		if (x > 1)
-			x = 1;
-		return linearToDb_nocap(x);
-	};
-	function dbToLinear_nocap(x)
-	{
-		return Math.pow(10, x / 20);
-	};
-	function linearToDb_nocap(x)
-	{
-		return (Math.log(x) / Math.log(10)) * 20;
-	};
-	var effects = {};
-	function getDestinationForTag(tag)
-	{
-		tag = tag.toLowerCase();
-		if (effects.hasOwnProperty(tag))
-		{
-			if (effects[tag].length)
-				return effects[tag][0].getInputNode();
-		}
-		return context["destination"];
-	};
-	function createGain()
-	{
-		if (context["createGain"])
-			return context["createGain"]();
-		else
-			return context["createGainNode"]();
-	};
-	function createDelay(d)
-	{
-		if (context["createDelay"])
-			return context["createDelay"](d);
-		else
-			return context["createDelayNode"](d);
-	};
-	function startSource(s, scheduledTime)
-	{
-		if (s["start"])
-			s["start"](scheduledTime || 0);
-		else
-			s["noteOn"](scheduledTime || 0);
-	};
-	function startSourceAt(s, x, d, scheduledTime)
-	{
-		if (s["start"])
-			s["start"](scheduledTime || 0, x);
-		else
-			s["noteGrainOn"](scheduledTime || 0, x, d - x);
-	};
-	function stopSource(s)
-	{
-		try {
-			if (s["stop"])
-				s["stop"](0);
-			else
-				s["noteOff"](0);
-		}
-		catch (e) {}
-	};
-	function setAudioParam(ap, value, ramp, time)
-	{
-		if (!ap)
-			return;		// iOS is missing some parameters
-		ap["cancelScheduledValues"](0);
-		if (time === 0)
-		{
-			ap["value"] = value;
-			return;
-		}
-		var curTime = context["currentTime"];
-		time += curTime;
-		switch (ramp) {
-		case 0:		// step
-			ap["setValueAtTime"](value, time);
-			break;
-		case 1:		// linear
-			ap["setValueAtTime"](ap["value"], curTime);		// to set what to ramp from
-			ap["linearRampToValueAtTime"](value, time);
-			break;
-		case 2:		// exponential
-			ap["setValueAtTime"](ap["value"], curTime);		// to set what to ramp from
-			ap["exponentialRampToValueAtTime"](value, time);
-			break;
-		}
-	};
-	var filterTypes = ["lowpass", "highpass", "bandpass", "lowshelf", "highshelf", "peaking", "notch", "allpass"];
-	function FilterEffect(type, freq, detune, q, gain, mix)
-	{
-		this.type = "filter";
-		this.params = [type, freq, detune, q, gain, mix];
-		this.inputNode = createGain();
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.filterNode = context["createBiquadFilter"]();
-		if (typeof this.filterNode["type"] === "number")
-			this.filterNode["type"] = type;
-		else
-			this.filterNode["type"] = filterTypes[type];
-		this.filterNode["frequency"]["value"] = freq;
-		if (this.filterNode["detune"])		// iOS 6 doesn't have detune yet
-			this.filterNode["detune"]["value"] = detune;
-		this.filterNode["Q"]["value"] = q;
-		this.filterNode["gain"]["value"] = gain;
-		this.inputNode["connect"](this.filterNode);
-		this.inputNode["connect"](this.dryNode);
-		this.filterNode["connect"](this.wetNode);
-	};
-	FilterEffect.prototype.connectTo = function (node)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-	};
-	FilterEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.filterNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	FilterEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	FilterEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[5] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		case 1:		// filter frequency
-			this.params[1] = value;
-			setAudioParam(this.filterNode["frequency"], value, ramp, time);
-			break;
-		case 2:		// filter detune
-			this.params[2] = value;
-			setAudioParam(this.filterNode["detune"], value, ramp, time);
-			break;
-		case 3:		// filter Q
-			this.params[3] = value;
-			setAudioParam(this.filterNode["Q"], value, ramp, time);
-			break;
-		case 4:		// filter/delay gain (note value is in dB here)
-			this.params[4] = value;
-			setAudioParam(this.filterNode["gain"], value, ramp, time);
-			break;
-		}
-	};
-	function DelayEffect(delayTime, delayGain, mix)
-	{
-		this.type = "delay";
-		this.params = [delayTime, delayGain, mix];
-		this.inputNode = createGain();
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.mainNode = createGain();
-		this.delayNode = createDelay(delayTime);
-		this.delayNode["delayTime"]["value"] = delayTime;
-		this.delayGainNode = createGain();
-		this.delayGainNode["gain"]["value"] = delayGain;
-		this.inputNode["connect"](this.mainNode);
-		this.inputNode["connect"](this.dryNode);
-		this.mainNode["connect"](this.wetNode);
-		this.mainNode["connect"](this.delayNode);
-		this.delayNode["connect"](this.delayGainNode);
-		this.delayGainNode["connect"](this.mainNode);
-	};
-	DelayEffect.prototype.connectTo = function (node)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-	};
-	DelayEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.mainNode["disconnect"]();
-		this.delayNode["disconnect"]();
-		this.delayGainNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	DelayEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	DelayEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[2] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		case 4:		// filter/delay gain (note value is passed in dB but needs to be linear here)
-			this.params[1] = dbToLinear(value);
-			setAudioParam(this.delayGainNode["gain"], dbToLinear(value), ramp, time);
-			break;
-		case 5:		// delay time
-			this.params[0] = value;
-			setAudioParam(this.delayNode["delayTime"], value, ramp, time);
-			break;
-		}
-	};
-	function ConvolveEffect(buffer, normalize, mix, src)
-	{
-		this.type = "convolve";
-		this.params = [normalize, mix, src];
-		this.inputNode = createGain();
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.convolveNode = context["createConvolver"]();
-		if (buffer)
-		{
-			this.convolveNode["normalize"] = normalize;
-			this.convolveNode["buffer"] = buffer;
-		}
-		this.inputNode["connect"](this.convolveNode);
-		this.inputNode["connect"](this.dryNode);
-		this.convolveNode["connect"](this.wetNode);
-	};
-	ConvolveEffect.prototype.connectTo = function (node)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-	};
-	ConvolveEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.convolveNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	ConvolveEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	ConvolveEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[1] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		}
-	};
-	function FlangerEffect(delay, modulation, freq, feedback, mix)
-	{
-		this.type = "flanger";
-		this.params = [delay, modulation, freq, feedback, mix];
-		this.inputNode = createGain();
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - (mix / 2);
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix / 2;
-		this.feedbackNode = createGain();
-		this.feedbackNode["gain"]["value"] = feedback;
-		this.delayNode = createDelay(delay + modulation);
-		this.delayNode["delayTime"]["value"] = delay;
-		this.oscNode = context["createOscillator"]();
-		this.oscNode["frequency"]["value"] = freq;
-		this.oscGainNode = createGain();
-		this.oscGainNode["gain"]["value"] = modulation;
-		this.inputNode["connect"](this.delayNode);
-		this.inputNode["connect"](this.dryNode);
-		this.delayNode["connect"](this.wetNode);
-		this.delayNode["connect"](this.feedbackNode);
-		this.feedbackNode["connect"](this.delayNode);
-		this.oscNode["connect"](this.oscGainNode);
-		this.oscGainNode["connect"](this.delayNode["delayTime"]);
-		startSource(this.oscNode);
-	};
-	FlangerEffect.prototype.connectTo = function (node)
-	{
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-	};
-	FlangerEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.delayNode["disconnect"]();
-		this.oscNode["disconnect"]();
-		this.oscGainNode["disconnect"]();
-		this.dryNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.feedbackNode["disconnect"]();
-	};
-	FlangerEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	FlangerEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[4] = value;
-			setAudioParam(this.wetNode["gain"], value / 2, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - (value / 2), ramp, time);
-			break;
-		case 6:		// modulation
-			this.params[1] = value / 1000;
-			setAudioParam(this.oscGainNode["gain"], value / 1000, ramp, time);
-			break;
-		case 7:		// modulation frequency
-			this.params[2] = value;
-			setAudioParam(this.oscNode["frequency"], value, ramp, time);
-			break;
-		case 8:		// feedback
-			this.params[3] = value / 100;
-			setAudioParam(this.feedbackNode["gain"], value / 100, ramp, time);
-			break;
-		}
-	};
-	function PhaserEffect(freq, detune, q, modulation, modfreq, mix)
-	{
-		this.type = "phaser";
-		this.params = [freq, detune, q, modulation, modfreq, mix];
-		this.inputNode = createGain();
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - (mix / 2);
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix / 2;
-		this.filterNode = context["createBiquadFilter"]();
-		if (typeof this.filterNode["type"] === "number")
-			this.filterNode["type"] = 7;	// all-pass
-		else
-			this.filterNode["type"] = "allpass";
-		this.filterNode["frequency"]["value"] = freq;
-		if (this.filterNode["detune"])		// iOS 6 doesn't have detune yet
-			this.filterNode["detune"]["value"] = detune;
-		this.filterNode["Q"]["value"] = q;
-		this.oscNode = context["createOscillator"]();
-		this.oscNode["frequency"]["value"] = modfreq;
-		this.oscGainNode = createGain();
-		this.oscGainNode["gain"]["value"] = modulation;
-		this.inputNode["connect"](this.filterNode);
-		this.inputNode["connect"](this.dryNode);
-		this.filterNode["connect"](this.wetNode);
-		this.oscNode["connect"](this.oscGainNode);
-		this.oscGainNode["connect"](this.filterNode["frequency"]);
-		startSource(this.oscNode);
-	};
-	PhaserEffect.prototype.connectTo = function (node)
-	{
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-	};
-	PhaserEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.filterNode["disconnect"]();
-		this.oscNode["disconnect"]();
-		this.oscGainNode["disconnect"]();
-		this.dryNode["disconnect"]();
-		this.wetNode["disconnect"]();
-	};
-	PhaserEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	PhaserEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[5] = value;
-			setAudioParam(this.wetNode["gain"], value / 2, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - (value / 2), ramp, time);
-			break;
-		case 1:		// filter frequency
-			this.params[0] = value;
-			setAudioParam(this.filterNode["frequency"], value, ramp, time);
-			break;
-		case 2:		// filter detune
-			this.params[1] = value;
-			setAudioParam(this.filterNode["detune"], value, ramp, time);
-			break;
-		case 3:		// filter Q
-			this.params[2] = value;
-			setAudioParam(this.filterNode["Q"], value, ramp, time);
-			break;
-		case 6:		// modulation
-			this.params[3] = value;
-			setAudioParam(this.oscGainNode["gain"], value, ramp, time);
-			break;
-		case 7:		// modulation frequency
-			this.params[4] = value;
-			setAudioParam(this.oscNode["frequency"], value, ramp, time);
-			break;
-		}
-	};
-	function GainEffect(g)
-	{
-		this.type = "gain";
-		this.params = [g];
-		this.node = createGain();
-		this.node["gain"]["value"] = g;
-	};
-	GainEffect.prototype.connectTo = function (node_)
-	{
-		this.node["disconnect"]();
-		this.node["connect"](node_);
-	};
-	GainEffect.prototype.remove = function ()
-	{
-		this.node["disconnect"]();
-	};
-	GainEffect.prototype.getInputNode = function ()
-	{
-		return this.node;
-	};
-	GainEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 4:		// gain
-			this.params[0] = dbToLinear(value);
-			setAudioParam(this.node["gain"], dbToLinear(value), ramp, time);
-			break;
-		}
-	};
-	function TremoloEffect(freq, mix)
-	{
-		this.type = "tremolo";
-		this.params = [freq, mix];
-		this.node = createGain();
-		this.node["gain"]["value"] = 1 - (mix / 2);
-		this.oscNode = context["createOscillator"]();
-		this.oscNode["frequency"]["value"] = freq;
-		this.oscGainNode = createGain();
-		this.oscGainNode["gain"]["value"] = mix / 2;
-		this.oscNode["connect"](this.oscGainNode);
-		this.oscGainNode["connect"](this.node["gain"]);
-		startSource(this.oscNode);
-	};
-	TremoloEffect.prototype.connectTo = function (node_)
-	{
-		this.node["disconnect"]();
-		this.node["connect"](node_);
-	};
-	TremoloEffect.prototype.remove = function ()
-	{
-		this.oscNode["disconnect"]();
-		this.oscGainNode["disconnect"]();
-		this.node["disconnect"]();
-	};
-	TremoloEffect.prototype.getInputNode = function ()
-	{
-		return this.node;
-	};
-	TremoloEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[1] = value;
-			setAudioParam(this.node["gain"]["value"], 1 - (value / 2), ramp, time);
-			setAudioParam(this.oscGainNode["gain"]["value"], value / 2, ramp, time);
-			break;
-		case 7:		// modulation frequency
-			this.params[0] = value;
-			setAudioParam(this.oscNode["frequency"], value, ramp, time);
-			break;
-		}
-	};
-	function RingModulatorEffect(freq, mix)
-	{
-		this.type = "ringmod";
-		this.params = [freq, mix];
-		this.inputNode = createGain();
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.ringNode = createGain();
-		this.ringNode["gain"]["value"] = 0;
-		this.oscNode = context["createOscillator"]();
-		this.oscNode["frequency"]["value"] = freq;
-		this.oscNode["connect"](this.ringNode["gain"]);
-		startSource(this.oscNode);
-		this.inputNode["connect"](this.ringNode);
-		this.inputNode["connect"](this.dryNode);
-		this.ringNode["connect"](this.wetNode);
-	};
-	RingModulatorEffect.prototype.connectTo = function (node_)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node_);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node_);
-	};
-	RingModulatorEffect.prototype.remove = function ()
-	{
-		this.oscNode["disconnect"]();
-		this.ringNode["disconnect"]();
-		this.inputNode["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	RingModulatorEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	RingModulatorEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[1] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		case 7:		// modulation frequency
-			this.params[0] = value;
-			setAudioParam(this.oscNode["frequency"], value, ramp, time);
-			break;
-		}
-	};
-	function DistortionEffect(threshold, headroom, drive, makeupgain, mix)
-	{
-		this.type = "distortion";
-		this.params = [threshold, headroom, drive, makeupgain, mix];
-		this.inputNode = createGain();
-		this.preGain = createGain();
-		this.postGain = createGain();
-		this.setDrive(drive, dbToLinear_nocap(makeupgain));
-		this.wetNode = createGain();
-		this.wetNode["gain"]["value"] = mix;
-		this.dryNode = createGain();
-		this.dryNode["gain"]["value"] = 1 - mix;
-		this.waveShaper = context["createWaveShaper"]();
-		this.curve = new Float32Array(65536);
-		this.generateColortouchCurve(threshold, headroom);
-		this.waveShaper.curve = this.curve;
-		this.inputNode["connect"](this.preGain);
-		this.inputNode["connect"](this.dryNode);
-		this.preGain["connect"](this.waveShaper);
-		this.waveShaper["connect"](this.postGain);
-		this.postGain["connect"](this.wetNode);
-	};
-	DistortionEffect.prototype.setDrive = function (drive, makeupgain)
-	{
-		if (drive < 0.01)
-			drive = 0.01;
-		this.preGain["gain"]["value"] = drive;
-		this.postGain["gain"]["value"] = Math.pow(1 / drive, 0.6) * makeupgain;
-	};
-	function e4(x, k)
-	{
-		return 1.0 - Math.exp(-k * x);
+		return this.lerp(this.lerp(this.lerp(a, b, x), this.lerp(b, c, x), x), this.lerp(this.lerp(b, c, x), this.lerp(c, d, x), x), x);
 	}
-	DistortionEffect.prototype.shape = function (x, linearThreshold, linearHeadroom)
+	CMath.clamp = function(x, min, max)
 	{
-		var maximum = 1.05 * linearHeadroom * linearThreshold;
-		var kk = (maximum - linearThreshold);
-		var sign = x < 0 ? -1 : +1;
-		var absx = x < 0 ? -x : x;
-		var shapedInput = absx < linearThreshold ? absx : linearThreshold + kk * e4(absx - linearThreshold, 1.0 / kk);
-		shapedInput *= sign;
-		return shapedInput;
-	};
-	DistortionEffect.prototype.generateColortouchCurve = function (threshold, headroom)
-	{
-		var linearThreshold = dbToLinear_nocap(threshold);
-		var linearHeadroom = dbToLinear_nocap(headroom);
-		var n = 65536;
-		var n2 = n / 2;
-		var x = 0;
-		for (var i = 0; i < n2; ++i) {
-			x = i / n2;
-			x = this.shape(x, linearThreshold, linearHeadroom);
-			this.curve[n2 + i] = x;
-			this.curve[n2 - i - 1] = -x;
-		}
-	};
-	DistortionEffect.prototype.connectTo = function (node)
-	{
-		this.wetNode["disconnect"]();
-		this.wetNode["connect"](node);
-		this.dryNode["disconnect"]();
-		this.dryNode["connect"](node);
-	};
-	DistortionEffect.prototype.remove = function ()
-	{
-		this.inputNode["disconnect"]();
-		this.preGain["disconnect"]();
-		this.waveShaper["disconnect"]();
-		this.postGain["disconnect"]();
-		this.wetNode["disconnect"]();
-		this.dryNode["disconnect"]();
-	};
-	DistortionEffect.prototype.getInputNode = function ()
-	{
-		return this.inputNode;
-	};
-	DistortionEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-		switch (param) {
-		case 0:		// mix
-			value = value / 100;
-			if (value < 0) value = 0;
-			if (value > 1) value = 1;
-			this.params[4] = value;
-			setAudioParam(this.wetNode["gain"], value, ramp, time);
-			setAudioParam(this.dryNode["gain"], 1 - value, ramp, time);
-			break;
-		}
-	};
-	function CompressorEffect(threshold, knee, ratio, attack, release)
-	{
-		this.type = "compressor";
-		this.params = [threshold, knee, ratio, attack, release];
-		this.node = context["createDynamicsCompressor"]();
-		try {
-			this.node["threshold"]["value"] = threshold;
-			this.node["knee"]["value"] = knee;
-			this.node["ratio"]["value"] = ratio;
-			this.node["attack"]["value"] = attack;
-			this.node["release"]["value"] = release;
-		}
-		catch (e) {}
-	};
-	CompressorEffect.prototype.connectTo = function (node_)
-	{
-		this.node["disconnect"]();
-		this.node["connect"](node_);
-	};
-	CompressorEffect.prototype.remove = function ()
-	{
-		this.node["disconnect"]();
-	};
-	CompressorEffect.prototype.getInputNode = function ()
-	{
-		return this.node;
-	};
-	CompressorEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-	};
-	function AnalyserEffect(fftSize, smoothing)
-	{
-		this.type = "analyser";
-		this.params = [fftSize, smoothing];
-		this.node = context["createAnalyser"]();
-		this.node["fftSize"] = fftSize;
-		this.node["smoothingTimeConstant"] = smoothing;
-		this.freqBins = new Float32Array(this.node["frequencyBinCount"]);
-		this.signal = new Uint8Array(fftSize);
-		this.peak = 0;
-		this.rms = 0;
-	};
-	AnalyserEffect.prototype.tick = function ()
-	{
-		this.node["getFloatFrequencyData"](this.freqBins);
-		this.node["getByteTimeDomainData"](this.signal);
-		var fftSize = this.node["fftSize"];
-		var i = 0;
-		this.peak = 0;
-		var rmsSquaredSum = 0;
-		var s = 0;
-		for ( ; i < fftSize; i++)
+		if (x < min)
 		{
-			s = (this.signal[i] - 128) / 128;
-			if (s < 0)
-				s = -s;
-			if (this.peak < s)
-				this.peak = s;
-			rmsSquaredSum += s * s;
+			return min;
 		}
-		this.peak = linearToDb(this.peak);
-		this.rms = linearToDb(Math.sqrt(rmsSquaredSum / fftSize));
-	};
-	AnalyserEffect.prototype.connectTo = function (node_)
-	{
-		this.node["disconnect"]();
-		this.node["connect"](node_);
-	};
-	AnalyserEffect.prototype.remove = function ()
-	{
-		this.node["disconnect"]();
-	};
-	AnalyserEffect.prototype.getInputNode = function ()
-	{
-		return this.node;
-	};
-	AnalyserEffect.prototype.setParam = function(param, value, ramp, time)
-	{
-	};
-	function ObjectTracker()
-	{
-		this.obj = null;
-		this.loadUid = 0;
-	};
-	ObjectTracker.prototype.setObject = function (obj_)
-	{
-		this.obj = obj_;
-	};
-	ObjectTracker.prototype.hasObject = function ()
-	{
-		return !!this.obj;
-	};
-	ObjectTracker.prototype.tick = function (dt)
-	{
-	};
-	var iOShadtouchstart = false;	// has had touch start input on iOS <=8 to work around web audio API muting
-	var iOShadtouchend = false;		// has had touch end input on iOS 9+ to work around web audio API muting
-	function C2AudioBuffer(src_, is_music)
-	{
-		this.src = src_;
-		this.myapi = api;
-		this.is_music = is_music;
-		this.added_end_listener = false;
-		var self = this;
-		this.outNode = null;
-		this.mediaSourceNode = null;
-		this.panWhenReady = [];		// for web audio API positioned sounds
-		this.seekWhenReady = 0;
-		this.pauseWhenReady = false;
-		this.supportWebAudioAPI = false;
-		this.failedToLoad = false;
-		this.wasEverReady = false;	// if a buffer is ever marked as ready, it's permanently considered ready after then.
-		if (api === API_WEBAUDIO && is_music && !playMusicAsSoundWorkaround)
+		else if (x > max)
 		{
-			this.myapi = API_HTML5;
-			this.outNode = createGain();
+			return max;
 		}
-		this.bufferObject = null;			// actual audio object
-		this.audioData = null;				// web audio api: ajax request result (compressed audio that needs decoding)
-		var request;
-		switch (this.myapi) {
-		case API_HTML5:
-			this.bufferObject = new Audio();
-			this.bufferObject.crossOrigin = "anonymous";
-			this.bufferObject.addEventListener("canplaythrough", function () {
-				self.wasEverReady = true;	// update loaded state so preload is considered complete
-			});
-			if (api === API_WEBAUDIO && context["createMediaElementSource"] && !/wiiu/i.test(navigator.userAgent))
+		return x;
+	};
+	function Transition(Type, Duration, Param1, Param2, Param3, Param4)
+	{
+		this.type = Type;
+		this.duration = Duration;
+		this.param1 = Param1;
+		this.param2 = Param2;
+		this.param3 = Param3;
+		this.param4 = Param4;
+		this.progress = 0;
+	}
+	function Camera(Name, X, Y, Scale, Global)
+	{
+		this.global = Global;
+		this.name = Name;
+		this.x = X;
+		this.y = Y;
+		this.scale = Scale;
+		this.following = false;
+		this.followedObjects = [];
+		this.followedObjectUIDs = [];
+		this.objectWeights = [];
+		this.followedObjectIPs = [];
+		this.followLag = 1;
+		this.zoomToContain = false;
+		this.zoomMarginH = 0;
+		this.zoomMarginV = 0;
+		this.zoomBoundU = -1;
+		this.zoomBoundL = -1;
+		this.transitions = [];
+		this.moveTransFinished = false;
+		this.zoomTransFinished = false;
+		this.isShaking = false;
+		this.shakeX = 0;
+		this.shakeY = 0;
+		this.shakeZoom = 0;
+		this.shakeTimer = 0;
+		this.shakeStrength = 0;
+		this.shakeMaxDeviation = 0;
+		this.shakeMaxZoomDeviation = 0;
+		this.shakeLength = 0;
+		this.shakeBuildTime = 0;
+		this.shakeDropTime = 0;
+	}
+	Camera.prototype.GetName = function()
+	{
+		return this.name;
+	};
+	Camera.prototype.GetX = function()
+	{
+		return this.x;
+	};
+	Camera.prototype.SetX = function(value)
+	{
+		this.x = value;
+	};
+	Camera.prototype.GetY = function()
+	{
+		return this.y;
+	};
+	Camera.prototype.SetY = function(value)
+	{
+		this.y = value;
+	};
+	Camera.prototype.GetShakeX = function()
+	{
+		return this.shakeX;
+	};
+	Camera.prototype.GetShakeY = function()
+	{
+		return this.shakeY;
+	};
+	Camera.prototype.SetFollowedObject = function(fObject)
+	{
+		this.followedObject = fObject;
+	};
+	Camera.prototype.ShakeCamera = function(dt)
+	{
+		if (this.isShaking)
+		{
+			this.shakeTimer += dt;
+			if (this.shakeTimer < this.shakeLength)
 			{
-				this.supportWebAudioAPI = true;		// can be routed through web audio api
-				this.bufferObject.addEventListener("canplay", function ()
+				var shakeStrength = 0;
+				if (this.shakeTimer < this.shakeBuildTime)
 				{
-					if (!self.mediaSourceNode)		// protect against this event firing twice
+					shakeStrength = CMath.lerp(0, this.shakeStrength, this.shakeTimer / this.shakeBuildTime);
+				}
+				else
+				{
+					shakeStrength = this.shakeStrength;
+				}
+				if (this.shakeTimer > this.shakeDropTime)
+				{
+					shakeStrength = CMath.lerp(this.shakeStrength, 0, (this.shakeTimer - this.shakeDropTime) / (this.shakeLength - this.shakeDropTime));
+				}
+				var shakeAngle = Math.floor(Math.random() * 361) / 57.2958;
+				var shakeX = CMath.lerp(0, Math.cos(shakeAngle) * this.shakeMaxDeviation, shakeStrength);
+				var shakeY = CMath.lerp(0, Math.sin(shakeAngle) * this.shakeMaxDeviation, shakeStrength);
+				var shakeZoom = CMath.lerp(0, (Math.floor(Math.random() * 201 - 100) / 100) * this.shakeMaxZoomDeviation, shakeStrength);
+				this.shakeX = CMath.lerp(this.shakeX, shakeX, shakeStrength);
+				this.shakeY = CMath.lerp(this.shakeY, shakeY, shakeStrength);
+				this.shakeZoom = CMath.lerp(this.shakeZoom, shakeZoom, shakeStrength);
+			}
+			else
+			{
+				this.isShaking = false;
+				this.shakeX = 0;
+				this.shakeY = 0;
+				this.shakeZoom = 0;
+			}
+		}
+	}
+	Camera.prototype.ProcessTransitions = function(dt)
+	{
+		this.moveTransFinished = false;
+		this.zoomTransFinished = false;
+		var transition;
+		for (var i = 0; i < this.transitions.length; )
+		{
+			transition = this.transitions[i];
+			transition.progress = CMath.clamp(transition.progress + (1.0 / transition.duration * dt), 0.0, 1.0);
+			if (transition.type == "MOVE")
+			{
+				this.x = CMath.cubic(transition.param3, transition.param3, transition.param1, transition.param1, transition.progress);
+				this.y = CMath.cubic(transition.param4, transition.param4, transition.param2, transition.param2, transition.progress);
+			}
+			else if (transition.type == "SCALE")
+			{
+				this.scale = CMath.cubic(transition.param2, transition.param2, transition.param1, transition.param1, transition.progress);
+			}
+			if (transition.progress == 1)
+			{
+				if (transition.type == "MOVE")
+				{
+					this.moveTransFinished = true;
+				}
+				else if (transition.type == "SCALE")
+				{
+					this.zoomTransFinished = true;
+				}
+				this.transitions.splice(i, 1);
+			}
+			else
+			{
+				i++;
+			}
+		}
+	};
+	Camera.prototype.UpdateCameraTarget = function(dt, targetCamera)
+	{
+		for (var i = 0; i < this.transitions.length; i++)
+		{
+			var transition = this.transitions[i];
+			if (transition.type == "MOVE")
+			{
+				transition.param1 = targetCamera.GetX();
+				transition.param2 = targetCamera.GetY();
+			}
+			else if (transition.type == "SCALE")
+			{
+				transition.param1 = targetCamera.scale;
+			}
+		}
+	};
+	Camera.prototype.ProcessFollowing = function(dt, screenWidth, screenHeight, layout)
+	{
+		var followed = this.followedObjects;
+		var followedObjectIPs = this.followedObjectIPs;
+		if (this.following && followed.length > 0)
+		{
+			var tempX = 0, tempY = 0, tempScale = 0;
+			if (!this.zoomToContain)
+			{
+				var sumX = 0, sumY = 0, sumW = 0;
+				for (var i = 0; i < followed.length; i++)
+				{
+					sumX += followed[i].getImagePoint(followedObjectIPs[i], true) * this.objectWeights[i];
+					sumY += followed[i].getImagePoint(followedObjectIPs[i], false) * this.objectWeights[i];
+					sumW += this.objectWeights[i];
+				}
+				tempX = sumX / sumW;
+				tempY = sumY / sumW;
+			}
+			else
+			{
+				var minX = 0, maxX = 0, minY = 0, maxY = 0;
+				var minXChanged = false, maxXChanged = false, minYChanged = false, maxYChanged = false;
+				for (var i = 0; i < followed.length; i++)
+				{
+					var fObject = followed[i];
+					fObject.update_bbox();
+					if (minXChanged)
 					{
-						self.mediaSourceNode = context["createMediaElementSource"](self.bufferObject);
-						self.mediaSourceNode["connect"](self.outNode);
-					}
-				});
-			}
-			this.bufferObject.autoplay = false;	// this is only a source buffer, not an instance
-			this.bufferObject.preload = "auto";
-			this.bufferObject.src = src_;
-			break;
-		case API_WEBAUDIO:
-			if (audRuntime.isWKWebView)
-			{
-				audRuntime.fetchLocalFileViaCordovaAsArrayBuffer(src_, function (arrayBuffer)
-				{
-					self.audioData = arrayBuffer;
-					self.decodeAudioBuffer();
-				}, function (err)
-				{
-					self.failedToLoad = true;
-				});
-			}
-			else
-			{
-				request = new XMLHttpRequest();
-				request.open("GET", src_, true);
-				request.responseType = "arraybuffer";
-				request.onload = function () {
-					self.audioData = request.response;
-					self.decodeAudioBuffer();
-				};
-				request.onerror = function () {
-					self.failedToLoad = true;
-				};
-				request.send();
-			}
-			break;
-		case API_CORDOVA:
-			this.bufferObject = true;
-			break;
-		case API_APPMOBI:
-			this.bufferObject = true;
-			break;
-		}
-	};
-	C2AudioBuffer.prototype.release = function ()
-	{
-		var i, len, j, a;
-		for (i = 0, j = 0, len = audioInstances.length; i < len; ++i)
-		{
-			a = audioInstances[i];
-			audioInstances[j] = a;
-			if (a.buffer === this)
-				a.stop();
-			else
-				++j;		// keep
-		}
-		audioInstances.length = j;
-		this.bufferObject = null;
-		this.audioData = null;
-	};
-	C2AudioBuffer.prototype.decodeAudioBuffer = function ()
-	{
-		if (this.bufferObject || !this.audioData)
-			return;		// audio already decoded or AJAX request not yet complete
-		var self = this;
-		if (context["decodeAudioData"])
-		{
-			context["decodeAudioData"](this.audioData, function (buffer) {
-					self.bufferObject = buffer;
-					self.audioData = null;		// clear AJAX response to allow GC and save memory, only need the bufferObject now
-					var p, i, len, a;
-					if (!cr.is_undefined(self.playTagWhenReady) && !silent)
-					{
-						if (self.panWhenReady.length)
-						{
-							for (i = 0, len = self.panWhenReady.length; i < len; i++)
-							{
-								p = self.panWhenReady[i];
-								a = new C2AudioInstance(self, p.thistag);
-								a.setPannerEnabled(true);
-								if (typeof p.objUid !== "undefined")
-								{
-									p.obj = audRuntime.getObjectByUID(p.objUid);
-									if (!p.obj)
-										continue;
-								}
-								if (p.obj)
-								{
-									var px = cr.rotatePtAround(p.obj.x, p.obj.y, -p.obj.layer.getAngle(), listenerX, listenerY, true);
-									var py = cr.rotatePtAround(p.obj.x, p.obj.y, -p.obj.layer.getAngle(), listenerX, listenerY, false);
-									a.setPan(px, py, cr.to_degrees(p.obj.angle - p.obj.layer.getAngle()), p.ia, p.oa, p.og);
-									a.setObject(p.obj);
-								}
-								else
-								{
-									a.setPan(p.x, p.y, p.a, p.ia, p.oa, p.og);
-								}
-								a.play(self.loopWhenReady, self.volumeWhenReady, self.seekWhenReady);
-								if (self.pauseWhenReady)
-									a.pause();
-								audioInstances.push(a);
-							}
-							cr.clearArray(self.panWhenReady);
-						}
-						else
-						{
-							a = new C2AudioInstance(self, self.playTagWhenReady || "");		// sometimes playTagWhenReady is not set - TODO: why?
-							a.play(self.loopWhenReady, self.volumeWhenReady, self.seekWhenReady);
-							if (self.pauseWhenReady)
-								a.pause();
-							audioInstances.push(a);
-						}
-					}
-					else if (!cr.is_undefined(self.convolveWhenReady))
-					{
-						var convolveNode = self.convolveWhenReady.convolveNode;
-						convolveNode["normalize"] = self.normalizeWhenReady;
-						convolveNode["buffer"] = buffer;
-					}
-			}, function (e) {
-				self.failedToLoad = true;
-			});
-		}
-		else
-		{
-			this.bufferObject = context["createBuffer"](this.audioData, false);
-			this.audioData = null;		// clear AJAX response to allow GC and save memory, only need the bufferObject now
-			if (!cr.is_undefined(this.playTagWhenReady) && !silent)
-			{
-				var a = new C2AudioInstance(this, this.playTagWhenReady);
-				a.play(this.loopWhenReady, this.volumeWhenReady, this.seekWhenReady);
-				if (this.pauseWhenReady)
-					a.pause();
-				audioInstances.push(a);
-			}
-			else if (!cr.is_undefined(this.convolveWhenReady))
-			{
-				var convolveNode = this.convolveWhenReady.convolveNode;
-				convolveNode["normalize"] = this.normalizeWhenReady;
-				convolveNode["buffer"] = this.bufferObject;
-			}
-		}
-	};
-	C2AudioBuffer.prototype.isLoaded = function ()
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			var ret = this.bufferObject["readyState"] >= 4;	// HAVE_ENOUGH_DATA
-			if (ret)
-				this.wasEverReady = true;
-			return ret || this.wasEverReady;
-		case API_WEBAUDIO:
-			return !!this.audioData || !!this.bufferObject;
-		case API_CORDOVA:
-			return true;
-		case API_APPMOBI:
-			return true;
-		}
-		return false;
-	};
-	C2AudioBuffer.prototype.isLoadedAndDecoded = function ()
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			return this.isLoaded();		// no distinction between loaded and decoded in HTML5 audio, just rely on ready state
-		case API_WEBAUDIO:
-			return !!this.bufferObject;
-		case API_CORDOVA:
-			return true;
-		case API_APPMOBI:
-			return true;
-		}
-		return false;
-	};
-	C2AudioBuffer.prototype.hasFailedToLoad = function ()
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			return !!this.bufferObject["error"];
-		case API_WEBAUDIO:
-			return this.failedToLoad;
-		}
-		return false;
-	};
-	function C2AudioInstance(buffer_, tag_)
-	{
-		var self = this;
-		this.tag = tag_;
-		this.fresh = true;
-		this.stopped = true;
-		this.src = buffer_.src;
-		this.buffer = buffer_;
-		this.myapi = api;
-		this.is_music = buffer_.is_music;
-		this.playbackRate = 1;
-		this.hasPlaybackEnded = true;	// ended flag
-		this.resume_me = false;			// make sure resumes when leaving suspend
-		this.is_paused = false;
-		this.resume_position = 0;		// for web audio api to resume from correct playback position
-		this.looping = false;
-		this.is_muted = false;
-		this.is_silent = false;
-		this.volume = 1;
-		this.onended_handler = function (e)
-		{
-			if (self.is_paused || self.resume_me)
-				return;
-			var bufferThatEnded = this;
-			if (!bufferThatEnded)
-				bufferThatEnded = e.target;
-			if (bufferThatEnded !== self.active_buffer)
-				return;
-			self.hasPlaybackEnded = true;
-			self.stopped = true;
-			audTag = self.tag;
-			audRuntime.trigger(cr.plugins_.Audio.prototype.cnds.OnEnded, audInst);
-		};
-		this.active_buffer = null;
-		this.isTimescaled = ((timescale_mode === 1 && !this.is_music) || timescale_mode === 2);
-		this.mutevol = 1;
-		this.startTime = (this.isTimescaled ? audRuntime.kahanTime.sum : audRuntime.wallTime.sum);
-		this.gainNode = null;
-		this.pannerNode = null;
-		this.pannerEnabled = false;
-		this.objectTracker = null;
-		this.panX = 0;
-		this.panY = 0;
-		this.panAngle = 0;
-		this.panConeInner = 0;
-		this.panConeOuter = 0;
-		this.panConeOuterGain = 0;
-		this.instanceObject = null;
-		var add_end_listener = false;
-		if (this.myapi === API_WEBAUDIO && this.buffer.myapi === API_HTML5 && !this.buffer.supportWebAudioAPI)
-			this.myapi = API_HTML5;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (this.is_music)
-			{
-				this.instanceObject = buffer_.bufferObject;
-				add_end_listener = !buffer_.added_end_listener;
-				buffer_.added_end_listener = true;
-			}
-			else
-			{
-				this.instanceObject = new Audio();
-				this.instanceObject.crossOrigin = "anonymous";
-				this.instanceObject.autoplay = false;
-				this.instanceObject.src = buffer_.bufferObject.src;
-				add_end_listener = true;
-			}
-			if (add_end_listener)
-			{
-				this.instanceObject.addEventListener('ended', function () {
-						audTag = self.tag;
-						self.stopped = true;
-						audRuntime.trigger(cr.plugins_.Audio.prototype.cnds.OnEnded, audInst);
-				});
-			}
-			break;
-		case API_WEBAUDIO:
-			this.gainNode = createGain();
-			this.gainNode["connect"](getDestinationForTag(tag_));
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (buffer_.bufferObject)
-				{
-					this.instanceObject = context["createBufferSource"]();
-					this.instanceObject["buffer"] = buffer_.bufferObject;
-					this.instanceObject["connect"](this.gainNode);
-				}
-			}
-			else
-			{
-				this.instanceObject = this.buffer.bufferObject;		// reference the audio element
-				this.buffer.outNode["connect"](this.gainNode);
-				if (!this.buffer.added_end_listener)
-				{
-					this.buffer.added_end_listener = true;
-					this.buffer.bufferObject.addEventListener('ended', function () {
-							audTag = self.tag;
-							self.stopped = true;
-							audRuntime.trigger(cr.plugins_.Audio.prototype.cnds.OnEnded, audInst);
-					});
-				}
-			}
-			break;
-		case API_CORDOVA:
-			this.instanceObject = new window["Media"](appPath + this.src, null, null, function (status) {
-					if (status === window["Media"]["MEDIA_STOPPED"])
-					{
-						self.hasPlaybackEnded = true;
-						self.stopped = true;
-						audTag = self.tag;
-						audRuntime.trigger(cr.plugins_.Audio.prototype.cnds.OnEnded, audInst);
-					}
-			});
-			break;
-		case API_APPMOBI:
-			this.instanceObject = true;
-			break;
-		}
-	};
-	C2AudioInstance.prototype.hasEnded = function ()
-	{
-		var time;
-		switch (this.myapi) {
-		case API_HTML5:
-			return this.instanceObject.ended;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (!this.fresh && !this.stopped && this.instanceObject["loop"])
-					return false;
-				if (this.is_paused)
-					return false;
-				return this.hasPlaybackEnded;
-			}
-			else
-				return this.instanceObject.ended;
-		case API_CORDOVA:
-			return this.hasPlaybackEnded;
-		case API_APPMOBI:
-			true;	// recycling an AppMobi sound does not matter because it will just do another throwaway playSound
-		}
-		return true;
-	};
-	C2AudioInstance.prototype.canBeRecycled = function ()
-	{
-		if (this.fresh || this.stopped)
-			return true;		// not yet used or is not playing
-		return this.hasEnded();
-	};
-	C2AudioInstance.prototype.setPannerEnabled = function (enable_)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		if (!this.pannerEnabled && enable_)
-		{
-			if (!this.gainNode)
-				return;
-			if (!this.pannerNode)
-			{
-				this.pannerNode = context["createPanner"]();
-				if (typeof this.pannerNode["panningModel"] === "number")
-					this.pannerNode["panningModel"] = panningModel;
-				else
-					this.pannerNode["panningModel"] = ["equalpower", "HRTF", "soundfield"][panningModel];
-				if (typeof this.pannerNode["distanceModel"] === "number")
-					this.pannerNode["distanceModel"] = distanceModel;
-				else
-					this.pannerNode["distanceModel"] = ["linear", "inverse", "exponential"][distanceModel];
-				this.pannerNode["refDistance"] = refDistance;
-				this.pannerNode["maxDistance"] = maxDistance;
-				this.pannerNode["rolloffFactor"] = rolloffFactor;
-			}
-			this.gainNode["disconnect"]();
-			this.gainNode["connect"](this.pannerNode);
-			this.pannerNode["connect"](getDestinationForTag(this.tag));
-			this.pannerEnabled = true;
-		}
-		else if (this.pannerEnabled && !enable_)
-		{
-			if (!this.gainNode)
-				return;
-			this.pannerNode["disconnect"]();
-			this.gainNode["disconnect"]();
-			this.gainNode["connect"](getDestinationForTag(this.tag));
-			this.pannerEnabled = false;
-		}
-	};
-	C2AudioInstance.prototype.setPan = function (x, y, angle, innerangle, outerangle, outergain)
-	{
-		if (!this.pannerEnabled || api !== API_WEBAUDIO)
-			return;
-		this.pannerNode["setPosition"](x, y, 0);
-		this.pannerNode["setOrientation"](Math.cos(cr.to_radians(angle)), Math.sin(cr.to_radians(angle)), 0);
-		this.pannerNode["coneInnerAngle"] = innerangle;
-		this.pannerNode["coneOuterAngle"] = outerangle;
-		this.pannerNode["coneOuterGain"] = outergain;
-		this.panX = x;
-		this.panY = y;
-		this.panAngle = angle;
-		this.panConeInner = innerangle;
-		this.panConeOuter = outerangle;
-		this.panConeOuterGain = outergain;
-	};
-	C2AudioInstance.prototype.setObject = function (o)
-	{
-		if (!this.pannerEnabled || api !== API_WEBAUDIO)
-			return;
-		if (!this.objectTracker)
-			this.objectTracker = new ObjectTracker();
-		this.objectTracker.setObject(o);
-	};
-	C2AudioInstance.prototype.tick = function (dt)
-	{
-		if (!this.pannerEnabled || api !== API_WEBAUDIO || !this.objectTracker || !this.objectTracker.hasObject() || !this.isPlaying())
-		{
-			return;
-		}
-		this.objectTracker.tick(dt);
-		var inst = this.objectTracker.obj;
-		var px = cr.rotatePtAround(inst.x, inst.y, -inst.layer.getAngle(), listenerX, listenerY, true);
-		var py = cr.rotatePtAround(inst.x, inst.y, -inst.layer.getAngle(), listenerX, listenerY, false);
-		this.pannerNode["setPosition"](px, py, 0);
-		var a = 0;
-		if (typeof this.objectTracker.obj.angle !== "undefined")
-		{
-			a = inst.angle - inst.layer.getAngle();
-			this.pannerNode["setOrientation"](Math.cos(a), Math.sin(a), 0);
-		}
-	};
-	C2AudioInstance.prototype.play = function (looping, vol, fromPosition, scheduledTime)
-	{
-		var instobj = this.instanceObject;
-		this.looping = looping;
-		this.volume = vol;
-		var seekPos = fromPosition || 0;
-		scheduledTime = scheduledTime || 0;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (instobj.playbackRate !== 1.0)
-				instobj.playbackRate = 1.0;
-			if (instobj.volume !== vol * masterVolume)
-				instobj.volume = vol * masterVolume;
-			if (instobj.loop !== looping)
-				instobj.loop = looping;
-			if (instobj.muted)
-				instobj.muted = false;
-			if (instobj.currentTime !== seekPos)
-			{
-				try {
-					instobj.currentTime = seekPos;
-				}
-				catch (err)
-				{
-;
-				}
-			}
-			if (this.is_music && isMusicWorkaround && !audRuntime.isInUserInputEvent)
-				musicPlayNextTouch.push(this);
-			else
-			{
-				try {
-					this.instanceObject.play();
-				}
-				catch (e) {		// sometimes throws on WP8.1... try not to kill the app
-					if (console && console.log)
-						console.log("[C2] WARNING: exception trying to play audio '" + this.buffer.src + "': ", e);
-				}
-			}
-			break;
-		case API_WEBAUDIO:
-			this.muted = false;
-			this.mutevol = 1;
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				this.gainNode["gain"]["value"] = vol * masterVolume;
-				if (!this.fresh)
-				{
-					this.instanceObject = context["createBufferSource"]();
-					this.instanceObject["buffer"] = this.buffer.bufferObject;
-					this.instanceObject["connect"](this.gainNode);
-				}
-				this.instanceObject["onended"] = this.onended_handler;
-				this.active_buffer = this.instanceObject;
-				this.instanceObject.loop = looping;
-				this.hasPlaybackEnded = false;
-				if (seekPos === 0)
-					startSource(this.instanceObject, scheduledTime);
-				else
-					startSourceAt(this.instanceObject, seekPos, this.getDuration(), scheduledTime);
-			}
-			else
-			{
-				if (instobj.playbackRate !== 1.0)
-					instobj.playbackRate = 1.0;
-				if (instobj.loop !== looping)
-					instobj.loop = looping;
-				instobj.volume = vol * masterVolume;
-				if (instobj.currentTime !== seekPos)
-				{
-					try {
-						instobj.currentTime = seekPos;
-					}
-					catch (err)
-					{
-;
-					}
-				}
-				if (this.is_music && isMusicWorkaround && !audRuntime.isInUserInputEvent)
-					musicPlayNextTouch.push(this);
-				else
-					instobj.play();
-			}
-			break;
-		case API_CORDOVA:
-			if ((!this.fresh && this.stopped) || seekPos !== 0)
-				instobj["seekTo"](seekPos);
-			instobj["play"]();
-			this.hasPlaybackEnded = false;
-			break;
-		case API_APPMOBI:
-			if (audRuntime.isDirectCanvas)
-				AppMobi["context"]["playSound"](this.src, looping);
-			else
-				AppMobi["player"]["playSound"](this.src, looping);
-			break;
-		}
-		this.playbackRate = 1;
-		this.startTime = (this.isTimescaled ? audRuntime.kahanTime.sum : audRuntime.wallTime.sum) - seekPos;
-		this.fresh = false;
-		this.stopped = false;
-		this.is_paused = false;
-	};
-	C2AudioInstance.prototype.stop = function ()
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			if (!this.instanceObject.paused)
-				this.instanceObject.pause();
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-				stopSource(this.instanceObject);
-			else
-			{
-				if (!this.instanceObject.paused)
-					this.instanceObject.pause();
-			}
-			break;
-		case API_CORDOVA:
-			this.instanceObject["stop"]();
-			break;
-		case API_APPMOBI:
-			if (audRuntime.isDirectCanvas)
-				AppMobi["context"]["stopSound"](this.src);
-			break;
-		}
-		this.stopped = true;
-		this.is_paused = false;
-	};
-	C2AudioInstance.prototype.pause = function ()
-	{
-		if (this.fresh || this.stopped || this.hasEnded() || this.is_paused)
-			return;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (!this.instanceObject.paused)
-				this.instanceObject.pause();
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				this.resume_position = this.getPlaybackTime(true);
-				if (this.looping)
-					this.resume_position = this.resume_position % this.getDuration();
-				this.is_paused = true;
-				stopSource(this.instanceObject);
-			}
-			else
-			{
-				if (!this.instanceObject.paused)
-					this.instanceObject.pause();
-			}
-			break;
-		case API_CORDOVA:
-			this.instanceObject["pause"]();
-			break;
-		case API_APPMOBI:
-			if (audRuntime.isDirectCanvas)
-				AppMobi["context"]["stopSound"](this.src);
-			break;
-		}
-		this.is_paused = true;
-	};
-	C2AudioInstance.prototype.resume = function ()
-	{
-		if (this.fresh || this.stopped || this.hasEnded() || !this.is_paused)
-			return;
-		switch (this.myapi) {
-		case API_HTML5:
-			this.instanceObject.play();
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				this.instanceObject = context["createBufferSource"]();
-				this.instanceObject["buffer"] = this.buffer.bufferObject;
-				this.instanceObject["connect"](this.gainNode);
-				this.instanceObject["onended"] = this.onended_handler;
-				this.active_buffer = this.instanceObject;
-				this.instanceObject.loop = this.looping;
-				this.gainNode["gain"]["value"] = masterVolume * this.volume * this.mutevol;
-				this.updatePlaybackRate();
-				this.startTime = (this.isTimescaled ? audRuntime.kahanTime.sum : audRuntime.wallTime.sum) - (this.resume_position / (this.playbackRate || 0.001));
-				startSourceAt(this.instanceObject, this.resume_position, this.getDuration());
-			}
-			else
-			{
-				this.instanceObject.play();
-			}
-			break;
-		case API_CORDOVA:
-			this.instanceObject["play"]();
-			break;
-		case API_APPMOBI:
-			if (audRuntime.isDirectCanvas)
-				AppMobi["context"]["resumeSound"](this.src);
-			break;
-		}
-		this.is_paused = false;
-	};
-	C2AudioInstance.prototype.seek = function (pos)
-	{
-		if (this.fresh || this.stopped || this.hasEnded())
-			return;
-		switch (this.myapi) {
-		case API_HTML5:
-			try {
-				this.instanceObject.currentTime = pos;
-			}
-			catch (e) {}
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (this.is_paused)
-					this.resume_position = pos;
-				else
-				{
-					this.pause();
-					this.resume_position = pos;
-					this.resume();
-				}
-			}
-			else
-			{
-				try {
-					this.instanceObject.currentTime = pos;
-				}
-				catch (e) {}
-			}
-			break;
-		case API_CORDOVA:
-			break;
-		case API_APPMOBI:
-			if (audRuntime.isDirectCanvas)
-				AppMobi["context"]["seekSound"](this.src, pos);
-			break;
-		}
-	};
-	C2AudioInstance.prototype.reconnect = function (toNode)
-	{
-		if (this.myapi !== API_WEBAUDIO)
-			return;
-		if (this.pannerEnabled)
-		{
-			this.pannerNode["disconnect"]();
-			this.pannerNode["connect"](toNode);
-		}
-		else
-		{
-			this.gainNode["disconnect"]();
-			this.gainNode["connect"](toNode);
-		}
-	};
-	C2AudioInstance.prototype.getDuration = function (applyPlaybackRate)
-	{
-		var ret = 0;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (typeof this.instanceObject.duration !== "undefined")
-				ret = this.instanceObject.duration;
-			break;
-		case API_WEBAUDIO:
-			ret = this.buffer.bufferObject["duration"];
-			break;
-		case API_CORDOVA:
-			ret = this.instanceObject["getDuration"]();
-			break;
-		case API_APPMOBI:
-			if (audRuntime.isDirectCanvas)
-				ret = AppMobi["context"]["getDurationSound"](this.src);
-			break;
-		}
-		if (applyPlaybackRate)
-			ret /= (this.playbackRate || 0.001);		// avoid divide-by-zero
-		return ret;
-	};
-	C2AudioInstance.prototype.getPlaybackTime = function (applyPlaybackRate)
-	{
-		var duration = this.getDuration();
-		var ret = 0;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (typeof this.instanceObject.currentTime !== "undefined")
-				ret = this.instanceObject.currentTime;
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (this.is_paused)
-					return this.resume_position;
-				else
-					ret = (this.isTimescaled ? audRuntime.kahanTime.sum : audRuntime.wallTime.sum) - this.startTime;
-			}
-			else if (typeof this.instanceObject.currentTime !== "undefined")
-				ret = this.instanceObject.currentTime;
-			break;
-		case API_CORDOVA:
-			break;
-		case API_APPMOBI:
-			if (audRuntime.isDirectCanvas)
-				ret = AppMobi["context"]["getPlaybackTimeSound"](this.src);
-			break;
-		}
-		if (applyPlaybackRate)
-			ret *= this.playbackRate;
-		if (!this.looping && ret > duration)
-			ret = duration;
-		return ret;
-	};
-	C2AudioInstance.prototype.isPlaying = function ()
-	{
-		return !this.is_paused && !this.fresh && !this.stopped && !this.hasEnded();
-	};
-	C2AudioInstance.prototype.shouldSave = function ()
-	{
-		return !this.fresh && !this.stopped && !this.hasEnded();
-	};
-	C2AudioInstance.prototype.setVolume = function (v)
-	{
-		this.volume = v;
-		this.updateVolume();
-	};
-	C2AudioInstance.prototype.updateVolume = function ()
-	{
-		var volToSet = this.volume * masterVolume;
-		if (!isFinite(volToSet))
-			volToSet = 0;		// HTMLMediaElement throws if setting non-finite volume
-		switch (this.myapi) {
-		case API_HTML5:
-			if (typeof this.instanceObject.volume !== "undefined" && this.instanceObject.volume !== volToSet)
-				this.instanceObject.volume = volToSet;
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				this.gainNode["gain"]["value"] = volToSet * this.mutevol;
-			}
-			else
-			{
-				if (typeof this.instanceObject.volume !== "undefined" && this.instanceObject.volume !== volToSet)
-					this.instanceObject.volume = volToSet;
-			}
-			break;
-		case API_CORDOVA:
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	C2AudioInstance.prototype.getVolume = function ()
-	{
-		return this.volume;
-	};
-	C2AudioInstance.prototype.doSetMuted = function (m)
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			if (this.instanceObject.muted !== !!m)
-				this.instanceObject.muted = !!m;
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				this.mutevol = (m ? 0 : 1);
-				this.gainNode["gain"]["value"] = masterVolume * this.volume * this.mutevol;
-			}
-			else
-			{
-				if (this.instanceObject.muted !== !!m)
-					this.instanceObject.muted = !!m;
-			}
-			break;
-		case API_CORDOVA:
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	C2AudioInstance.prototype.setMuted = function (m)
-	{
-		this.is_muted = !!m;
-		this.doSetMuted(this.is_muted || this.is_silent);
-	};
-	C2AudioInstance.prototype.setSilent = function (m)
-	{
-		this.is_silent = !!m;
-		this.doSetMuted(this.is_muted || this.is_silent);
-	};
-	C2AudioInstance.prototype.setLooping = function (l)
-	{
-		this.looping = l;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (this.instanceObject.loop !== !!l)
-				this.instanceObject.loop = !!l;
-			break;
-		case API_WEBAUDIO:
-			if (this.instanceObject.loop !== !!l)
-				this.instanceObject.loop = !!l;
-			break;
-		case API_CORDOVA:
-			break;
-		case API_APPMOBI:
-			if (audRuntime.isDirectCanvas)
-				AppMobi["context"]["setLoopingSound"](this.src, l);
-			break;
-		}
-	};
-	C2AudioInstance.prototype.setPlaybackRate = function (r)
-	{
-		this.playbackRate = r;
-		this.updatePlaybackRate();
-	};
-	C2AudioInstance.prototype.updatePlaybackRate = function ()
-	{
-		var r = this.playbackRate;
-		if (this.isTimescaled)
-			r *= audRuntime.timescale;
-		switch (this.myapi) {
-		case API_HTML5:
-			if (this.instanceObject.playbackRate !== r)
-				this.instanceObject.playbackRate = r;
-			break;
-		case API_WEBAUDIO:
-			if (this.buffer.myapi === API_WEBAUDIO)
-			{
-				if (this.instanceObject["playbackRate"]["value"] !== r)
-					this.instanceObject["playbackRate"]["value"] = r;
-			}
-			else
-			{
-				if (this.instanceObject.playbackRate !== r)
-					this.instanceObject.playbackRate = r;
-			}
-			break;
-		case API_CORDOVA:
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	C2AudioInstance.prototype.setSuspended = function (s)
-	{
-		switch (this.myapi) {
-		case API_HTML5:
-			if (s)
-			{
-				if (this.isPlaying())
-				{
-					this.resume_me = true;
-					this.instanceObject["pause"]();
-				}
-				else
-					this.resume_me = false;
-			}
-			else
-			{
-				if (this.resume_me)
-				{
-					this.instanceObject["play"]();
-					this.resume_me = false;
-				}
-			}
-			break;
-		case API_WEBAUDIO:
-			if (s)
-			{
-				if (this.isPlaying())
-				{
-					this.resume_me = true;
-					if (this.buffer.myapi === API_WEBAUDIO)
-					{
-						this.resume_position = this.getPlaybackTime(true);
-						if (this.looping)
-							this.resume_position = this.resume_position % this.getDuration();
-						stopSource(this.instanceObject);
-					}
-					else
-						this.instanceObject["pause"]();
-				}
-				else
-					this.resume_me = false;
-			}
-			else
-			{
-				if (this.resume_me)
-				{
-					if (this.buffer.myapi === API_WEBAUDIO)
-					{
-						this.instanceObject = context["createBufferSource"]();
-						this.instanceObject["buffer"] = this.buffer.bufferObject;
-						this.instanceObject["connect"](this.gainNode);
-						this.instanceObject["onended"] = this.onended_handler;
-						this.active_buffer = this.instanceObject;
-						this.instanceObject.loop = this.looping;
-						this.gainNode["gain"]["value"] = masterVolume * this.volume * this.mutevol;
-						this.updatePlaybackRate();
-						this.startTime = (this.isTimescaled ? audRuntime.kahanTime.sum : audRuntime.wallTime.sum) - (this.resume_position / (this.playbackRate || 0.001));
-						startSourceAt(this.instanceObject, this.resume_position, this.getDuration());
+						minX = Math.min(minX, fObject.bbox.left);
 					}
 					else
 					{
-						this.instanceObject["play"]();
+						minX = fObject.bbox.left;
+						minXChanged = true;
 					}
-					this.resume_me = false;
-				}
-			}
-			break;
-		case API_CORDOVA:
-			if (s)
-			{
-				if (this.isPlaying())
-				{
-					this.instanceObject["pause"]();
-					this.resume_me = true;
-				}
-				else
-					this.resume_me = false;
-			}
-			else
-			{
-				if (this.resume_me)
-				{
-					this.resume_me = false;
-					this.instanceObject["play"]();
-				}
-			}
-			break;
-		case API_APPMOBI:
-			break;
-		}
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-		audRuntime = this.runtime;
-		audInst = this;
-		this.listenerTracker = null;
-		this.listenerZ = -600;
-		if (this.runtime.isWKWebView)
-			playMusicAsSoundWorkaround = true;
-		if ((this.runtime.isiOS || (this.runtime.isAndroid && (this.runtime.isChrome || this.runtime.isAndroidStockBrowser))) && !this.runtime.isCrosswalk && !this.runtime.isDomFree && !this.runtime.isAmazonWebApp && !playMusicAsSoundWorkaround)
-		{
-			isMusicWorkaround = true;
-		}
-		context = null;
-		if (typeof AudioContext !== "undefined")
-		{
-			api = API_WEBAUDIO;
-			context = new AudioContext();
-		}
-		else if (typeof webkitAudioContext !== "undefined")
-		{
-			api = API_WEBAUDIO;
-			context = new webkitAudioContext();
-		}
-		if (this.runtime.isiOS && context)
-		{
-			if (context.close)
-				context.close();
-			if (typeof AudioContext !== "undefined")
-				context = new AudioContext();
-			else if (typeof webkitAudioContext !== "undefined")
-				context = new webkitAudioContext();
-		}
-		var isAndroid = this.runtime.isAndroid;
-		var playDummyBuffer = function ()
-		{
-			if (isContextSuspended || !context["createBuffer"])
-				return;
-			var buffer = context["createBuffer"](1, 220, 22050);
-			var source = context["createBufferSource"]();
-			source["buffer"] = buffer;
-			source["connect"](context["destination"]);
-			startSource(source);
-		};
-		if (isMusicWorkaround)
-		{
-			var playQueuedMusic = function ()
-			{
-				var i, len, m;
-				if (isMusicWorkaround)
-				{
-					if (!silent)
+					if (maxXChanged)
 					{
-						for (i = 0, len = musicPlayNextTouch.length; i < len; ++i)
-						{
-							m = musicPlayNextTouch[i];
-							if (!m.stopped && !m.is_paused)
-								m.instanceObject.play();
-						}
-					}
-					cr.clearArray(musicPlayNextTouch);
-				}
-			};
-			document.addEventListener("touchend", function ()
-			{
-				if (!iOShadtouchend && context)
-				{
-					playDummyBuffer();
-					iOShadtouchend = true;
-				}
-				playQueuedMusic();
-			}, true);
-		}
-		else if (playMusicAsSoundWorkaround)
-		{
-			document.addEventListener("touchend", function ()
-			{
-				if (!iOShadtouchend && context)
-				{
-					playDummyBuffer();
-					iOShadtouchend = true;
-				}
-			}, true);
-		}
-		if (api !== API_WEBAUDIO)
-		{
-			if (this.runtime.isCordova && typeof window["Media"] !== "undefined")
-				api = API_CORDOVA;
-			else if (this.runtime.isAppMobi)
-				api = API_APPMOBI;
-		}
-		if (api === API_CORDOVA)
-		{
-			appPath = location.href;
-			var i = appPath.lastIndexOf("/");
-			if (i > -1)
-				appPath = appPath.substr(0, i + 1);
-			appPath = appPath.replace("file://", "");
-		}
-		if (this.runtime.isSafari && this.runtime.isWindows && typeof Audio === "undefined")
-		{
-			alert("It looks like you're using Safari for Windows without Quicktime.  Audio cannot be played until Quicktime is installed.");
-			this.runtime.DestroyInstance(this);
-		}
-		else
-		{
-			if (this.runtime.isDirectCanvas)
-				useOgg = this.runtime.isAndroid;		// AAC on iOS, OGG on Android
-			else
-			{
-				try {
-					useOgg = !!(new Audio().canPlayType('audio/ogg; codecs="vorbis"'));
-				}
-				catch (e)
-				{
-					useOgg = false;
-				}
-			}
-			switch (api) {
-			case API_HTML5:
-;
-				break;
-			case API_WEBAUDIO:
-;
-				break;
-			case API_CORDOVA:
-;
-				break;
-			case API_APPMOBI:
-;
-				break;
-			default:
-;
-			}
-			this.runtime.tickMe(this);
-		}
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function ()
-	{
-		this.runtime.audioInstance = this;
-		timescale_mode = this.properties[0];	// 0 = off, 1 = sounds only, 2 = all
-		this.saveload = this.properties[1];		// 0 = all, 1 = sounds only, 2 = music only, 3 = none
-		this.playinbackground = (this.properties[2] !== 0);
-		this.nextPlayTime = 0;
-		panningModel = this.properties[3];		// 0 = equalpower, 1 = hrtf, 3 = soundfield
-		distanceModel = this.properties[4];		// 0 = linear, 1 = inverse, 2 = exponential
-		this.listenerZ = -this.properties[5];
-		refDistance = this.properties[6];
-		maxDistance = this.properties[7];
-		rolloffFactor = this.properties[8];
-		this.listenerTracker = new ObjectTracker();
-		var draw_width = (this.runtime.draw_width || this.runtime.width);
-		var draw_height = (this.runtime.draw_height || this.runtime.height);
-		if (api === API_WEBAUDIO)
-		{
-			context["listener"]["setPosition"](draw_width / 2, draw_height / 2, this.listenerZ);
-			context["listener"]["setOrientation"](0, 0, 1, 0, -1, 0);
-			window["c2OnAudioMicStream"] = function (localMediaStream, tag)
-			{
-				if (micSource)
-					micSource["disconnect"]();
-				micTag = tag.toLowerCase();
-				micSource = context["createMediaStreamSource"](localMediaStream);
-				micSource["connect"](getDestinationForTag(micTag));
-			};
-		}
-		this.runtime.addSuspendCallback(function(s)
-		{
-			audInst.onSuspend(s);
-		});
-		var self = this;
-		this.runtime.addDestroyCallback(function (inst)
-		{
-			self.onInstanceDestroyed(inst);
-		});
-	};
-	instanceProto.onInstanceDestroyed = function (inst)
-	{
-		var i, len, a;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			if (a.objectTracker)
-			{
-				if (a.objectTracker.obj === inst)
-				{
-					a.objectTracker.obj = null;
-					if (a.pannerEnabled && a.isPlaying() && a.looping)
-						a.stop();
-				}
-			}
-		}
-		if (this.listenerTracker.obj === inst)
-			this.listenerTracker.obj = null;
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		var o = {
-			"silent": silent,
-			"masterVolume": masterVolume,
-			"listenerZ": this.listenerZ,
-			"listenerUid": this.listenerTracker.hasObject() ? this.listenerTracker.obj.uid : -1,
-			"playing": [],
-			"effects": {}
-		};
-		var playingarr = o["playing"];
-		var i, len, a, d, p, panobj, playbackTime;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			if (!a.shouldSave())
-				continue;				// no need to save stopped sounds
-			if (this.saveload === 3)	// not saving/loading any sounds/music
-				continue;
-			if (a.is_music && this.saveload === 1)	// not saving/loading music
-				continue;
-			if (!a.is_music && this.saveload === 2)	// not saving/loading sound
-				continue;
-			playbackTime = a.getPlaybackTime();
-			if (a.looping)
-				playbackTime = playbackTime % a.getDuration();
-			d = {
-				"tag": a.tag,
-				"buffersrc": a.buffer.src,
-				"is_music": a.is_music,
-				"playbackTime": playbackTime,
-				"volume": a.volume,
-				"looping": a.looping,
-				"muted": a.is_muted,
-				"playbackRate": a.playbackRate,
-				"paused": a.is_paused,
-				"resume_position": a.resume_position
-			};
-			if (a.pannerEnabled)
-			{
-				d["pan"] = {};
-				panobj = d["pan"];
-				if (a.objectTracker && a.objectTracker.hasObject())
-				{
-					panobj["objUid"] = a.objectTracker.obj.uid;
-				}
-				else
-				{
-					panobj["x"] = a.panX;
-					panobj["y"] = a.panY;
-					panobj["a"] = a.panAngle;
-				}
-				panobj["ia"] = a.panConeInner;
-				panobj["oa"] = a.panConeOuter;
-				panobj["og"] = a.panConeOuterGain;
-			}
-			playingarr.push(d);
-		}
-		var fxobj = o["effects"];
-		var fxarr;
-		for (p in effects)
-		{
-			if (effects.hasOwnProperty(p))
-			{
-				fxarr = [];
-				for (i = 0, len = effects[p].length; i < len; i++)
-				{
-					fxarr.push({ "type": effects[p][i].type, "params": effects[p][i].params });
-				}
-				fxobj[p] = fxarr;
-			}
-		}
-		return o;
-	};
-	var objectTrackerUidsToLoad = [];
-	instanceProto.loadFromJSON = function (o)
-	{
-		var setSilent = o["silent"];
-		masterVolume = o["masterVolume"];
-		this.listenerZ = o["listenerZ"];
-		this.listenerTracker.setObject(null);
-		var listenerUid = o["listenerUid"];
-		if (listenerUid !== -1)
-		{
-			this.listenerTracker.loadUid = listenerUid;
-			objectTrackerUidsToLoad.push(this.listenerTracker);
-		}
-		var playingarr = o["playing"];
-		var i, len, d, src, is_music, tag, playbackTime, looping, vol, b, a, p, pan, panObjUid;
-		if (this.saveload !== 3)
-		{
-			for (i = 0, len = audioInstances.length; i < len; i++)
-			{
-				a = audioInstances[i];
-				if (a.is_music && this.saveload === 1)
-					continue;		// only saving/loading sound: leave music playing
-				if (!a.is_music && this.saveload === 2)
-					continue;		// only saving/loading music: leave sound playing
-				a.stop();
-			}
-		}
-		var fxarr, fxtype, fxparams, fx;
-		for (p in effects)
-		{
-			if (effects.hasOwnProperty(p))
-			{
-				for (i = 0, len = effects[p].length; i < len; i++)
-					effects[p][i].remove();
-			}
-		}
-		cr.wipe(effects);
-		for (p in o["effects"])
-		{
-			if (o["effects"].hasOwnProperty(p))
-			{
-				fxarr = o["effects"][p];
-				for (i = 0, len = fxarr.length; i < len; i++)
-				{
-					fxtype = fxarr[i]["type"];
-					fxparams = fxarr[i]["params"];
-					switch (fxtype) {
-					case "filter":
-						addEffectForTag(p, new FilterEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4], fxparams[5]));
-						break;
-					case "delay":
-						addEffectForTag(p, new DelayEffect(fxparams[0], fxparams[1], fxparams[2]));
-						break;
-					case "convolve":
-						src = fxparams[2];
-						b = this.getAudioBuffer(src, false);
-						if (b.bufferObject)
-						{
-							fx = new ConvolveEffect(b.bufferObject, fxparams[0], fxparams[1], src);
-						}
-						else
-						{
-							fx = new ConvolveEffect(null, fxparams[0], fxparams[1], src);
-							b.normalizeWhenReady = fxparams[0];
-							b.convolveWhenReady = fx;
-						}
-						addEffectForTag(p, fx);
-						break;
-					case "flanger":
-						addEffectForTag(p, new FlangerEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4]));
-						break;
-					case "phaser":
-						addEffectForTag(p, new PhaserEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4], fxparams[5]));
-						break;
-					case "gain":
-						addEffectForTag(p, new GainEffect(fxparams[0]));
-						break;
-					case "tremolo":
-						addEffectForTag(p, new TremoloEffect(fxparams[0], fxparams[1]));
-						break;
-					case "ringmod":
-						addEffectForTag(p, new RingModulatorEffect(fxparams[0], fxparams[1]));
-						break;
-					case "distortion":
-						addEffectForTag(p, new DistortionEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4]));
-						break;
-					case "compressor":
-						addEffectForTag(p, new CompressorEffect(fxparams[0], fxparams[1], fxparams[2], fxparams[3], fxparams[4]));
-						break;
-					case "analyser":
-						addEffectForTag(p, new AnalyserEffect(fxparams[0], fxparams[1]));
-						break;
-					}
-				}
-			}
-		}
-		for (i = 0, len = playingarr.length; i < len; i++)
-		{
-			if (this.saveload === 3)	// not saving/loading any sounds/music
-				continue;
-			d = playingarr[i];
-			src = d["buffersrc"];
-			is_music = d["is_music"];
-			tag = d["tag"];
-			playbackTime = d["playbackTime"];
-			looping = d["looping"];
-			vol = d["volume"];
-			pan = d["pan"];
-			panObjUid = (pan && pan.hasOwnProperty("objUid")) ? pan["objUid"] : -1;
-			if (is_music && this.saveload === 1)	// not saving/loading music
-				continue;
-			if (!is_music && this.saveload === 2)	// not saving/loading sound
-				continue;
-			a = this.getAudioInstance(src, tag, is_music, looping, vol);
-			if (!a)
-			{
-				b = this.getAudioBuffer(src, is_music);
-				b.seekWhenReady = playbackTime;
-				b.pauseWhenReady = d["paused"];
-				if (pan)
-				{
-					if (panObjUid !== -1)
-					{
-						b.panWhenReady.push({ objUid: panObjUid, ia: pan["ia"], oa: pan["oa"], og: pan["og"], thistag: tag });
+						maxX = Math.max(maxX, fObject.bbox.right);
 					}
 					else
 					{
-						b.panWhenReady.push({ x: pan["x"], y: pan["y"], a: pan["a"], ia: pan["ia"], oa: pan["oa"], og: pan["og"], thistag: tag });
+						maxX = fObject.bbox.right;
+						maxXChanged = true;
+					}
+					if (minYChanged)
+					{
+						minY = Math.min(minY, fObject.bbox.top);
+					}
+					else
+					{
+						minY = fObject.bbox.top;
+						minYChanged = true;
+					}
+					if (maxYChanged)
+					{
+						maxY = Math.max(maxY, fObject.bbox.bottom);
+					}
+					else
+					{
+						maxY = fObject.bbox.bottom;
+						maxYChanged = true;
 					}
 				}
-				continue;
-			}
-			a.resume_position = d["resume_position"];
-			a.setPannerEnabled(!!pan);
-			a.play(looping, vol, playbackTime);
-			a.updatePlaybackRate();
-			a.updateVolume();
-			a.doSetMuted(a.is_muted || a.is_silent);
-			if (d["paused"])
-				a.pause();
-			if (d["muted"])
-				a.setMuted(true);
-			a.doSetMuted(a.is_muted || a.is_silent);
-			if (pan)
-			{
-				if (panObjUid !== -1)
+				var tempXScale = (screenWidth - this.zoomMarginH * 2) / (maxX - minX);
+				var tempYScale = (screenHeight - this.zoomMarginV * 2) / (maxY - minY);
+				tempX = CMath.lerp(minX, maxX, 0.5);
+				tempY = CMath.lerp(minY, maxY, 0.5);
+				if (this.x < ((screenWidth / 2) / tempXScale))
 				{
-					a.objectTracker = a.objectTracker || new ObjectTracker();
-					a.objectTracker.loadUid = panObjUid;
-					objectTrackerUidsToLoad.push(a.objectTracker);
+					tempXScale = (screenWidth - this.zoomMarginH) / maxX;
+					tempX = (screenWidth / tempXScale) / 2;
 				}
-				else
+				if (this.x > (layout.width - (screenWidth / 2) / tempXScale))
 				{
-					a.setPan(pan["x"], pan["y"], pan["a"], pan["ia"], pan["oa"], pan["og"]);
+					tempXScale = (screenWidth - this.zoomMarginH) / (layout.width - minX);
+					tempX = layout.width - (screenWidth / tempXScale) / 2;
+				}
+				if (this.y < ((screenHeight / 2) / tempYScale))
+				{
+					tempYScale = (screenHeight - this.zoomMarginV) / maxY;
+					tempY = (screenHeight / tempYScale) / 2;
+				}
+				if (this.y > (layout.height - (screenHeight / 2) / tempYScale))
+				{
+					tempYScale = (screenHeight - this.zoomMarginV) / (layout.height - minY);
+					tempY = layout.height - (screenHeight / tempYScale) / 2;
+				}
+				tempScale = Math.min(tempXScale, tempYScale);
+				if (this.zoomBoundL != -1)
+				{
+					if (tempScale < this.zoomBoundL)
+					{
+						tempScale = this.zoomBoundL;
+					}
+				}
+				if (this.zoomBoundU != -1)
+				{
+					if (tempScale > this.zoomBoundU)
+					{
+						tempScale = this.zoomBoundU;
+					}
 				}
 			}
-		}
-		if (setSilent && !silent)			// setting silent
-		{
-			for (i = 0, len = audioInstances.length; i < len; i++)
-				audioInstances[i].setSilent(true);
-			silent = true;
-		}
-		else if (!setSilent && silent)		// setting not silent
-		{
-			for (i = 0, len = audioInstances.length; i < len; i++)
-				audioInstances[i].setSilent(false);
-			silent = false;
-		}
-	};
-	instanceProto.afterLoad = function ()
-	{
-		var i, len, ot, inst;
-		for (i = 0, len = objectTrackerUidsToLoad.length; i < len; i++)
-		{
-			ot = objectTrackerUidsToLoad[i];
-			inst = this.runtime.getObjectByUID(ot.loadUid);
-			ot.setObject(inst);
-			ot.loadUid = -1;
-			if (inst)
+			if (this.followLag == 1)
 			{
-				listenerX = inst.x;
-				listenerY = inst.y;
-			}
-		}
-		cr.clearArray(objectTrackerUidsToLoad);
-	};
-	instanceProto.onSuspend = function (s)
-	{
-		if (this.playinbackground)
-			return;
-		if (!s && context && context["resume"])
-		{
-			context["resume"]();
-			isContextSuspended = false;
-		}
-		var i, len;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-			audioInstances[i].setSuspended(s);
-		if (s && context && context["suspend"])
-		{
-			context["suspend"]();
-			isContextSuspended = true;
-		}
-	};
-	instanceProto.tick = function ()
-	{
-		var dt = this.runtime.dt;
-		var i, len, a;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			a.tick(dt);
-			if (timescale_mode !== 0)
-				a.updatePlaybackRate();
-		}
-		var p, arr, f;
-		for (p in effects)
-		{
-			if (effects.hasOwnProperty(p))
-			{
-				arr = effects[p];
-				for (i = 0, len = arr.length; i < len; i++)
+				this.x = tempX;
+				this.y = tempY;
+				if (this.zoomToContain)
 				{
-					f = arr[i];
-					if (f.tick)
-						f.tick();
+					this.scale = tempScale;
+				}
+			}
+			else
+			{
+				var lag = (this.followLag * 4.0 * dt) * Math.sqrt(1.0 / dt);
+				this.x = CMath.lerp(this.x, tempX, lag);
+				this.y = CMath.lerp(this.y, tempY, lag);
+				if (this.zoomToContain)
+				{
+					this.scale = CMath.lerp(this.scale, tempScale, lag);
 				}
 			}
 		}
-		if (api === API_WEBAUDIO && this.listenerTracker.hasObject())
-		{
-			this.listenerTracker.tick(dt);
-			listenerX = this.listenerTracker.obj.x;
-			listenerY = this.listenerTracker.obj.y;
-			context["listener"]["setPosition"](this.listenerTracker.obj.x, this.listenerTracker.obj.y, this.listenerZ);
-		}
 	};
-	var preload_list = [];
-	instanceProto.setPreloadList = function (arr)
-	{
-		var i, len, p, filename, size, isOgg;
-		var total_size = 0;
-		for (i = 0, len = arr.length; i < len; ++i)
-		{
-			p = arr[i];
-			filename = p[0];
-			size = p[1] * 2;
-			isOgg = (filename.length > 4 && filename.substr(filename.length - 4) === ".ogg");
-			if ((isOgg && useOgg) || (!isOgg && !useOgg))
-			{
-				preload_list.push({
-					filename: filename,
-					size: size,
-					obj: null
-				});
-				total_size += size;
-			}
-		}
-		return total_size;
-	};
-	instanceProto.startPreloads = function ()
-	{
-		var i, len, p, src;
-		for (i = 0, len = preload_list.length; i < len; ++i)
-		{
-			p = preload_list[i];
-			src = this.runtime.files_subfolder + p.filename;
-			p.obj = this.getAudioBuffer(src, false);
-		}
-	};
-	instanceProto.getPreloadedSize = function ()
-	{
-		var completed = 0;
-		var i, len, p;
-		for (i = 0, len = preload_list.length; i < len; ++i)
-		{
-			p = preload_list[i];
-			if (p.obj.isLoadedAndDecoded() || p.obj.hasFailedToLoad() || this.runtime.isDomFree || this.runtime.isAndroidStockBrowser)
-			{
-				completed += p.size;
-			}
-			else if (p.obj.isLoaded())	// downloaded but not decoded: only happens in Web Audio API, count as half-way progress
-			{
-				completed += Math.floor(p.size / 2);
-			}
-		};
-		return completed;
-	};
-	instanceProto.releaseAllMusicBuffers = function ()
-	{
-		var i, len, j, b;
-		for (i = 0, j = 0, len = audioBuffers.length; i < len; ++i)
-		{
-			b = audioBuffers[i];
-			audioBuffers[j] = b;
-			if (b.is_music)
-				b.release();
-			else
-				++j;		// keep
-		}
-		audioBuffers.length = j;
-	};
-	instanceProto.getAudioBuffer = function (src_, is_music)
-	{
-		var i, len, a, ret = null, j, k, lenj, ai;
-		for (i = 0, len = audioBuffers.length; i < len; i++)
-		{
-			a = audioBuffers[i];
-			if (a.src === src_)
-			{
-				ret = a;
-				break;
-			}
-		}
-		if (!ret)
-		{
-			if (playMusicAsSoundWorkaround && is_music)
-				this.releaseAllMusicBuffers();
-			ret = new C2AudioBuffer(src_, is_music);
-			audioBuffers.push(ret);
-		}
-		return ret;
-	};
-	instanceProto.getAudioInstance = function (src_, tag, is_music, looping, vol)
-	{
-		var i, len, a;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			if (a.src === src_ && (a.canBeRecycled() || is_music))
-			{
-				a.tag = tag;
-				return a;
-			}
-		}
-		var b = this.getAudioBuffer(src_, is_music);
-		if (!b.bufferObject)
-		{
-			if (tag !== "<preload>")
-			{
-				b.playTagWhenReady = tag;
-				b.loopWhenReady = looping;
-				b.volumeWhenReady = vol;
-			}
-			return null;
-		}
-		a = new C2AudioInstance(b, tag);
-		audioInstances.push(a);
-		return a;
-	};
-	var taggedAudio = [];
-	function SortByIsPlaying(a, b)
-	{
-		var an = a.isPlaying() ? 1 : 0;
-		var bn = b.isPlaying() ? 1 : 0;
-		if (an === bn)
-			return 0;
-		else if (an < bn)
-			return 1;
-		else
-			return -1;
-	};
-	function getAudioByTag(tag, sort_by_playing)
-	{
-		cr.clearArray(taggedAudio);
-		if (!tag.length)
-		{
-			if (!lastAudio || lastAudio.hasEnded())
-				return;
-			else
-			{
-				cr.clearArray(taggedAudio);
-				taggedAudio[0] = lastAudio;
-				return;
-			}
-		}
-		var i, len, a;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			a = audioInstances[i];
-			if (cr.equals_nocase(tag, a.tag))
-				taggedAudio.push(a);
-		}
-		if (sort_by_playing)
-			taggedAudio.sort(SortByIsPlaying);
-	};
-	function reconnectEffects(tag)
-	{
-		var i, len, arr, n, toNode = context["destination"];
-		if (effects.hasOwnProperty(tag))
-		{
-			arr = effects[tag];
-			if (arr.length)
-			{
-				toNode = arr[0].getInputNode();
-				for (i = 0, len = arr.length; i < len; i++)
-				{
-					n = arr[i];
-					if (i + 1 === len)
-						n.connectTo(context["destination"]);
-					else
-						n.connectTo(arr[i + 1].getInputNode());
-				}
-			}
-		}
-		getAudioByTag(tag);
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].reconnect(toNode);
-		if (micSource && micTag === tag)
-		{
-			micSource["disconnect"]();
-			micSource["connect"](toNode);
-		}
-	};
-	function addEffectForTag(tag, fx)
-	{
-		if (!effects.hasOwnProperty(tag))
-			effects[tag] = [fx];
-		else
-			effects[tag].push(fx);
-		reconnectEffects(tag);
-	};
-	function Cnds() {};
-	Cnds.prototype.OnEnded = function (t)
-	{
-		return cr.equals_nocase(audTag, t);
-	};
-	Cnds.prototype.PreloadsComplete = function ()
-	{
-		var i, len;
-		for (i = 0, len = audioBuffers.length; i < len; i++)
-		{
-			if (!audioBuffers[i].isLoadedAndDecoded() && !audioBuffers[i].hasFailedToLoad())
-				return false;
-		}
-		return true;
-	};
-	Cnds.prototype.AdvancedAudioSupported = function ()
-	{
-		return api === API_WEBAUDIO;
-	};
-	Cnds.prototype.IsSilent = function ()
-	{
-		return silent;
-	};
-	Cnds.prototype.IsAnyPlaying = function ()
-	{
-		var i, len;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-		{
-			if (audioInstances[i].isPlaying())
-				return true;
-		}
-		return false;
-	};
-	Cnds.prototype.IsTagPlaying = function (tag)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-		{
-			if (taggedAudio[i].isPlaying())
-				return true;
-		}
-		return false;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.Play = function (file, looping, vol, tag)
-	{
-		if (silent)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = file[1];
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-			return;
-		lastAudio.setPannerEnabled(false);
-		lastAudio.play(looping!==0, v, 0, this.nextPlayTime);
-		this.nextPlayTime = 0;
-	};
-	Acts.prototype.PlayAtPosition = function (file, looping, vol, x_, y_, angle_, innerangle_, outerangle_, outergain_, tag)
-	{
-		if (silent)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = file[1];
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-		{
-			var b = this.getAudioBuffer(src, is_music);
-			b.panWhenReady.push({ x: x_, y: y_, a: angle_, ia: innerangle_, oa: outerangle_, og: dbToLinear(outergain_), thistag: tag });
-			return;
-		}
-		lastAudio.setPannerEnabled(true);
-		lastAudio.setPan(x_, y_, angle_, innerangle_, outerangle_, dbToLinear(outergain_));
-		lastAudio.play(looping!==0, v, 0, this.nextPlayTime);
-		this.nextPlayTime = 0;
-	};
-	Acts.prototype.PlayAtObject = function (file, looping, vol, obj, innerangle, outerangle, outergain, tag)
-	{
-		if (silent || !obj)
-			return;
-		var inst = obj.getFirstPicked();
-		if (!inst)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = file[1];
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-		{
-			var b = this.getAudioBuffer(src, is_music);
-			b.panWhenReady.push({ obj: inst, ia: innerangle, oa: outerangle, og: dbToLinear(outergain), thistag: tag });
-			return;
-		}
-		lastAudio.setPannerEnabled(true);
-		var px = cr.rotatePtAround(inst.x, inst.y, -inst.layer.getAngle(), listenerX, listenerY, true);
-		var py = cr.rotatePtAround(inst.x, inst.y, -inst.layer.getAngle(), listenerX, listenerY, false);
-		lastAudio.setPan(px, py, cr.to_degrees(inst.angle - inst.layer.getAngle()), innerangle, outerangle, dbToLinear(outergain));
-		lastAudio.setObject(inst);
-		lastAudio.play(looping!==0, v, 0, this.nextPlayTime);
-		this.nextPlayTime = 0;
-	};
-	Acts.prototype.PlayByName = function (folder, filename, looping, vol, tag)
-	{
-		if (silent)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = (folder === 1);
-		var src = this.runtime.files_subfolder + filename.toLowerCase() + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-			return;
-		lastAudio.setPannerEnabled(false);
-		lastAudio.play(looping!==0, v, 0, this.nextPlayTime);
-		this.nextPlayTime = 0;
-	};
-	Acts.prototype.PlayAtPositionByName = function (folder, filename, looping, vol, x_, y_, angle_, innerangle_, outerangle_, outergain_, tag)
-	{
-		if (silent)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = (folder === 1);
-		var src = this.runtime.files_subfolder + filename.toLowerCase() + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-		{
-			var b = this.getAudioBuffer(src, is_music);
-			b.panWhenReady.push({ x: x_, y: y_, a: angle_, ia: innerangle_, oa: outerangle_, og: dbToLinear(outergain_), thistag: tag });
-			return;
-		}
-		lastAudio.setPannerEnabled(true);
-		lastAudio.setPan(x_, y_, angle_, innerangle_, outerangle_, dbToLinear(outergain_));
-		lastAudio.play(looping!==0, v, 0, this.nextPlayTime);
-		this.nextPlayTime = 0;
-	};
-	Acts.prototype.PlayAtObjectByName = function (folder, filename, looping, vol, obj, innerangle, outerangle, outergain, tag)
-	{
-		if (silent || !obj)
-			return;
-		var inst = obj.getFirstPicked();
-		if (!inst)
-			return;
-		var v = dbToLinear(vol);
-		var is_music = (folder === 1);
-		var src = this.runtime.files_subfolder + filename.toLowerCase() + (useOgg ? ".ogg" : ".m4a");
-		lastAudio = this.getAudioInstance(src, tag, is_music, looping!==0, v);
-		if (!lastAudio)
-		{
-			var b = this.getAudioBuffer(src, is_music);
-			b.panWhenReady.push({ obj: inst, ia: innerangle, oa: outerangle, og: dbToLinear(outergain), thistag: tag });
-			return;
-		}
-		lastAudio.setPannerEnabled(true);
-		var px = cr.rotatePtAround(inst.x, inst.y, -inst.layer.getAngle(), listenerX, listenerY, true);
-		var py = cr.rotatePtAround(inst.x, inst.y, -inst.layer.getAngle(), listenerX, listenerY, false);
-		lastAudio.setPan(px, py, cr.to_degrees(inst.angle - inst.layer.getAngle()), innerangle, outerangle, dbToLinear(outergain));
-		lastAudio.setObject(inst);
-		lastAudio.play(looping!==0, v, 0, this.nextPlayTime);
-		this.nextPlayTime = 0;
-	};
-	Acts.prototype.SetLooping = function (tag, looping)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].setLooping(looping === 0);
-	};
-	Acts.prototype.SetMuted = function (tag, muted)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].setMuted(muted === 0);
-	};
-	Acts.prototype.SetVolume = function (tag, vol)
-	{
-		getAudioByTag(tag);
-		var v = dbToLinear(vol);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].setVolume(v);
-	};
-	Acts.prototype.Preload = function (file)
-	{
-		if (silent)
-			return;
-		var is_music = file[1];
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		if (api === API_APPMOBI)
-		{
-			if (this.runtime.isDirectCanvas)
-				AppMobi["context"]["loadSound"](src);
-			else
-				AppMobi["player"]["loadSound"](src);
-			return;
-		}
-		else if (api === API_CORDOVA)
-		{
-			return;
-		}
-		this.getAudioInstance(src, "<preload>", is_music, false);
-	};
-	Acts.prototype.PreloadByName = function (folder, filename)
-	{
-		if (silent)
-			return;
-		var is_music = (folder === 1);
-		var src = this.runtime.files_subfolder + filename.toLowerCase() + (useOgg ? ".ogg" : ".m4a");
-		if (api === API_APPMOBI)
-		{
-			if (this.runtime.isDirectCanvas)
-				AppMobi["context"]["loadSound"](src);
-			else
-				AppMobi["player"]["loadSound"](src);
-			return;
-		}
-		else if (api === API_CORDOVA)
-		{
-			return;
-		}
-		this.getAudioInstance(src, "<preload>", is_music, false);
-	};
-	Acts.prototype.SetPlaybackRate = function (tag, rate)
-	{
-		getAudioByTag(tag);
-		if (rate < 0.0)
-			rate = 0;
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].setPlaybackRate(rate);
-	};
-	Acts.prototype.Stop = function (tag)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-			taggedAudio[i].stop();
-	};
-	Acts.prototype.StopAll = function ()
-	{
-		var i, len;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-			audioInstances[i].stop();
-	};
-	Acts.prototype.SetPaused = function (tag, state)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-		{
-			if (state === 0)
-				taggedAudio[i].pause();
-			else
-				taggedAudio[i].resume();
-		}
-	};
-	Acts.prototype.Seek = function (tag, pos)
-	{
-		getAudioByTag(tag);
-		var i, len;
-		for (i = 0, len = taggedAudio.length; i < len; i++)
-		{
-			taggedAudio[i].seek(pos);
-		}
-	};
-	Acts.prototype.SetSilent = function (s)
-	{
-		var i, len;
-		if (s === 2)					// toggling
-			s = (silent ? 1 : 0);		// choose opposite state
-		if (s === 0 && !silent)			// setting silent
-		{
-			for (i = 0, len = audioInstances.length; i < len; i++)
-				audioInstances[i].setSilent(true);
-			silent = true;
-		}
-		else if (s === 1 && silent)		// setting not silent
-		{
-			for (i = 0, len = audioInstances.length; i < len; i++)
-				audioInstances[i].setSilent(false);
-			silent = false;
-		}
-	};
-	Acts.prototype.SetMasterVolume = function (vol)
-	{
-		masterVolume = dbToLinear(vol);
-		var i, len;
-		for (i = 0, len = audioInstances.length; i < len; i++)
-			audioInstances[i].updateVolume();
-	};
-	Acts.prototype.AddFilterEffect = function (tag, type, freq, detune, q, gain, mix)
-	{
-		if (api !== API_WEBAUDIO || type < 0 || type >= filterTypes.length || !context["createBiquadFilter"])
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new FilterEffect(type, freq, detune, q, gain, mix));
-	};
-	Acts.prototype.AddDelayEffect = function (tag, delay, gain, mix)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new DelayEffect(delay, dbToLinear(gain), mix));
-	};
-	Acts.prototype.AddFlangerEffect = function (tag, delay, modulation, freq, feedback, mix)
-	{
-		if (api !== API_WEBAUDIO || !context["createOscillator"])
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new FlangerEffect(delay / 1000, modulation / 1000, freq, feedback / 100, mix));
-	};
-	Acts.prototype.AddPhaserEffect = function (tag, freq, detune, q, mod, modfreq, mix)
-	{
-		if (api !== API_WEBAUDIO || !context["createOscillator"])
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new PhaserEffect(freq, detune, q, mod, modfreq, mix));
-	};
-	Acts.prototype.AddConvolutionEffect = function (tag, file, norm, mix)
-	{
-		if (api !== API_WEBAUDIO || !context["createConvolver"])
-			return;
-		var doNormalize = (norm === 0);
-		var src = this.runtime.files_subfolder + file[0] + (useOgg ? ".ogg" : ".m4a");
-		var b = this.getAudioBuffer(src, false);
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		var fx;
-		if (b.bufferObject)
-		{
-			fx = new ConvolveEffect(b.bufferObject, doNormalize, mix, src);
-		}
-		else
-		{
-			fx = new ConvolveEffect(null, doNormalize, mix, src);
-			b.normalizeWhenReady = doNormalize;
-			b.convolveWhenReady = fx;
-		}
-		addEffectForTag(tag, fx);
-	};
-	Acts.prototype.AddGainEffect = function (tag, g)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		addEffectForTag(tag, new GainEffect(dbToLinear(g)));
-	};
-	Acts.prototype.AddMuteEffect = function (tag)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		addEffectForTag(tag, new GainEffect(0));	// re-use gain effect with 0 gain
-	};
-	Acts.prototype.AddTremoloEffect = function (tag, freq, mix)
-	{
-		if (api !== API_WEBAUDIO || !context["createOscillator"])
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new TremoloEffect(freq, mix));
-	};
-	Acts.prototype.AddRingModEffect = function (tag, freq, mix)
-	{
-		if (api !== API_WEBAUDIO || !context["createOscillator"])
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new RingModulatorEffect(freq, mix));
-	};
-	Acts.prototype.AddDistortionEffect = function (tag, threshold, headroom, drive, makeupgain, mix)
-	{
-		if (api !== API_WEBAUDIO || !context["createWaveShaper"])
-			return;
-		tag = tag.toLowerCase();
-		mix = mix / 100;
-		if (mix < 0) mix = 0;
-		if (mix > 1) mix = 1;
-		addEffectForTag(tag, new DistortionEffect(threshold, headroom, drive, makeupgain, mix));
-	};
-	Acts.prototype.AddCompressorEffect = function (tag, threshold, knee, ratio, attack, release)
-	{
-		if (api !== API_WEBAUDIO || !context["createDynamicsCompressor"])
-			return;
-		tag = tag.toLowerCase();
-		addEffectForTag(tag, new CompressorEffect(threshold, knee, ratio, attack / 1000, release / 1000));
-	};
-	Acts.prototype.AddAnalyserEffect = function (tag, fftSize, smoothing)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		addEffectForTag(tag, new AnalyserEffect(fftSize, smoothing));
-	};
-	Acts.prototype.RemoveEffects = function (tag)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		var i, len, arr;
-		if (effects.hasOwnProperty(tag))
-		{
-			arr = effects[tag];
-			if (arr.length)
-			{
-				for (i = 0, len = arr.length; i < len; i++)
-					arr[i].remove();
-				cr.clearArray(arr);
-				reconnectEffects(tag);
-			}
-		}
-	};
-	Acts.prototype.SetEffectParameter = function (tag, index, param, value, ramp, time)
-	{
-		if (api !== API_WEBAUDIO)
-			return;
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		var arr;
-		if (!effects.hasOwnProperty(tag))
-			return;
-		arr = effects[tag];
-		if (index < 0 || index >= arr.length)
-			return;
-		arr[index].setParam(param, value, ramp, time);
-	};
-	Acts.prototype.SetListenerObject = function (obj_)
-	{
-		if (!obj_ || api !== API_WEBAUDIO)
-			return;
-		var inst = obj_.getFirstPicked();
-		if (!inst)
-			return;
-		this.listenerTracker.setObject(inst);
-		listenerX = inst.x;
-		listenerY = inst.y;
-	};
-	Acts.prototype.SetListenerZ = function (z)
-	{
-		this.listenerZ = z;
-	};
-	Acts.prototype.ScheduleNextPlay = function (t)
-	{
-		if (!context)
-			return;		// needs Web Audio API
-		this.nextPlayTime = t;
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.Duration = function (ret, tag)
-	{
-		getAudioByTag(tag, true);
-		if (taggedAudio.length)
-			ret.set_float(taggedAudio[0].getDuration());
-		else
-			ret.set_float(0);
-	};
-	Exps.prototype.PlaybackTime = function (ret, tag)
-	{
-		getAudioByTag(tag, true);
-		if (taggedAudio.length)
-			ret.set_float(taggedAudio[0].getPlaybackTime(true));
-		else
-			ret.set_float(0);
-	};
-	Exps.prototype.Volume = function (ret, tag)
-	{
-		getAudioByTag(tag, true);
-		if (taggedAudio.length)
-		{
-			var v = taggedAudio[0].getVolume();
-			ret.set_float(linearToDb(v));
-		}
-		else
-			ret.set_float(0);
-	};
-	Exps.prototype.MasterVolume = function (ret)
-	{
-		ret.set_float(linearToDb(masterVolume));
-	};
-	Exps.prototype.EffectCount = function (ret, tag)
-	{
-		tag = tag.toLowerCase();
-		var arr = null;
-		if (effects.hasOwnProperty(tag))
-			arr = effects[tag];
-		ret.set_int(arr ? arr.length : 0);
-	};
-	function getAnalyser(tag, index)
-	{
-		var arr = null;
-		if (effects.hasOwnProperty(tag))
-			arr = effects[tag];
-		if (arr && index >= 0 && index < arr.length && arr[index].freqBins)
-			return arr[index];
-		else
-			return null;
-	};
-	Exps.prototype.AnalyserFreqBinCount = function (ret, tag, index)
-	{
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		var analyser = getAnalyser(tag, index);
-		ret.set_int(analyser ? analyser.node["frequencyBinCount"] : 0);
-	};
-	Exps.prototype.AnalyserFreqBinAt = function (ret, tag, index, bin)
-	{
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		bin = Math.floor(bin);
-		var analyser = getAnalyser(tag, index);
-		if (!analyser)
-			ret.set_float(0);
-		else if (bin < 0 || bin >= analyser.node["frequencyBinCount"])
-			ret.set_float(0);
-		else
-			ret.set_float(analyser.freqBins[bin]);
-	};
-	Exps.prototype.AnalyserPeakLevel = function (ret, tag, index)
-	{
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		var analyser = getAnalyser(tag, index);
-		if (analyser)
-			ret.set_float(analyser.peak);
-		else
-			ret.set_float(0);
-	};
-	Exps.prototype.AnalyserRMSLevel = function (ret, tag, index)
-	{
-		tag = tag.toLowerCase();
-		index = Math.floor(index);
-		var analyser = getAnalyser(tag, index);
-		if (analyser)
-			ret.set_float(analyser.rms);
-		else
-			ret.set_float(0);
-	};
-	Exps.prototype.SampleRate = function (ret)
-	{
-		ret.set_int(context ? context.sampleRate : 0);
-	};
-	Exps.prototype.CurrentTime = function (ret)
-	{
-		ret.set_float(context ? context.currentTime : cr.performance_now());
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.Browser = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.Browser.prototype;
+	var pluginProto = cr.plugins_.MagiCam.prototype;
 	pluginProto.Type = function(plugin)
 	{
 		this.plugin = plugin;
@@ -18239,1435 +15445,348 @@ cr.plugins_.Browser = function(runtime)
 	{
 		this.type = type;
 		this.runtime = type.runtime;
+		this.localCameras = [];
+		this.localCameraCount = 0;
+		this.localCameraCountOld = 0;
+		this.transCamera = null;
+		this.transTarget = null;
+		this.isSwitchingCameras = false;
+		this.globalCameras = [];
+		this.activeCamera = null;
 	};
 	var instanceProto = pluginProto.Instance.prototype;
 	instanceProto.onCreate = function()
 	{
-		var self = this;
-		window.addEventListener("resize", function () {
-			self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnResize, self);
-		});
-		if (typeof navigator.onLine !== "undefined")
-		{
-			window.addEventListener("online", function() {
-				self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnOnline, self);
-			});
-			window.addEventListener("offline", function() {
-				self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnOffline, self);
-			});
-		}
-		if (typeof window.applicationCache !== "undefined")
-		{
-			window.applicationCache.addEventListener('updateready', function() {
-				self.runtime.loadingprogress = 1;
-				self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnUpdateReady, self);
-			});
-			window.applicationCache.addEventListener('progress', function(e) {
-				self.runtime.loadingprogress = (e["loaded"] / e["total"]) || 0;
-			});
-		}
-		if (!this.runtime.isDirectCanvas)
-		{
-			document.addEventListener("appMobi.device.update.available", function() {
-				self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnUpdateReady, self);
-			});
-			document.addEventListener("backbutton", function() {
-				self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnBackButton, self);
-			});
-			document.addEventListener("menubutton", function() {
-				self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnMenuButton, self);
-			});
-			document.addEventListener("searchbutton", function() {
-				self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnSearchButton, self);
-			});
-			document.addEventListener("tizenhwkey", function (e) {
-				var ret;
-				switch (e["keyName"]) {
-				case "back":
-					ret = self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnBackButton, self);
-					if (!ret)
-					{
-						if (window["tizen"])
-							window["tizen"]["application"]["getCurrentApplication"]()["exit"]();
-					}
-					break;
-				case "menu":
-					ret = self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnMenuButton, self);
-					if (!ret)
-						e.preventDefault();
-					break;
-				}
-			});
-		}
-		if (this.runtime.isWindows10 && typeof Windows !== "undefined")
-		{
-			Windows["UI"]["Core"]["SystemNavigationManager"]["getForCurrentView"]().addEventListener("backrequested", function (e)
-			{
-				var ret = self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnBackButton, self);
-				if (ret)
-					e.handled = true;
-		    });
-		}
-		else if (this.runtime.isWinJS && WinJS["Application"])
-		{
-			WinJS["Application"]["onbackclick"] = function (e)
-			{
-				return !!self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnBackButton, self);
-			};
-		}
-		this.runtime.addSuspendCallback(function(s) {
-			if (s)
-			{
-				self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnPageHidden, self);
-			}
-			else
-			{
-				self.runtime.trigger(cr.plugins_.Browser.prototype.cnds.OnPageVisible, self);
-			}
-		});
-		this.is_arcade = (typeof window["is_scirra_arcade"] !== "undefined");
-	};
-	var batteryManager = null;
-	var loadedBatteryManager = false;
-	function maybeLoadBatteryManager()
-	{
-		if (loadedBatteryManager)
-			return;
-		if (!navigator["getBattery"])
-			return;
-		var promise = navigator["getBattery"]();
-		loadedBatteryManager = true;
-		if (promise)
-		{
-			promise.then(function (manager) {
-				batteryManager = manager;
-			});
-		}
-	};
-	function Cnds() {};
-	Cnds.prototype.CookiesEnabled = function()
-	{
-		return navigator ? navigator.cookieEnabled : false;
-	};
-	Cnds.prototype.IsOnline = function()
-	{
-		return navigator ? navigator.onLine : false;
-	};
-	Cnds.prototype.HasJava = function()
-	{
-		return navigator ? navigator.javaEnabled() : false;
-	};
-	Cnds.prototype.OnOnline = function()
-	{
-		return true;
-	};
-	Cnds.prototype.OnOffline = function()
-	{
-		return true;
-	};
-	Cnds.prototype.IsDownloadingUpdate = function ()
-	{
-		if (typeof window["applicationCache"] === "undefined")
-			return false;
-		else
-			return window["applicationCache"]["status"] === window["applicationCache"]["DOWNLOADING"];
-	};
-	Cnds.prototype.OnUpdateReady = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.PageVisible = function ()
-	{
-		return !this.runtime.isSuspended;
-	};
-	Cnds.prototype.OnPageVisible = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnPageHidden = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnResize = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.IsFullscreen = function ()
-	{
-		return !!(document["mozFullScreen"] || document["webkitIsFullScreen"] || document["fullScreen"] || this.runtime.isNodeFullscreen);
-	};
-	Cnds.prototype.OnBackButton = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnMenuButton = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnSearchButton = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.IsMetered = function ()
-	{
-		var connection = navigator["connection"] || navigator["mozConnection"] || navigator["webkitConnection"];
-		if (!connection)
-			return false;
-		return !!connection["metered"];
-	};
-	Cnds.prototype.IsCharging = function ()
-	{
-		var battery = navigator["battery"] || navigator["mozBattery"] || navigator["webkitBattery"];
-		if (battery)
-		{
-			return !!battery["charging"]
-		}
-		else
-		{
-			maybeLoadBatteryManager();
-			if (batteryManager)
-			{
-				return !!batteryManager["charging"];
-			}
-			else
-			{
-				return true;		// if unknown, default to charging (powered)
-			}
-		}
-	};
-	Cnds.prototype.IsPortraitLandscape = function (p)
-	{
-		var current = (window.innerWidth <= window.innerHeight ? 0 : 1);
-		return current === p;
-	};
-	Cnds.prototype.SupportsFullscreen = function ()
-	{
-		if (this.runtime.isNodeWebkit)
-			return true;
-		var elem = this.runtime.canvasdiv || this.runtime.canvas;
-		return !!(elem["requestFullscreen"] || elem["mozRequestFullScreen"] || elem["msRequestFullscreen"] || elem["webkitRequestFullScreen"]);
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.Alert = function (msg)
-	{
-		if (!this.runtime.isDomFree)
-			alert(msg.toString());
-	};
-	Acts.prototype.Close = function ()
-	{
-		if (this.runtime.isCocoonJs)
-			CocoonJS["App"]["forceToFinish"]();
-		else if (window["tizen"])
-			window["tizen"]["application"]["getCurrentApplication"]()["exit"]();
-		else if (navigator["app"] && navigator["app"]["exitApp"])
-			navigator["app"]["exitApp"]();
-		else if (navigator["device"] && navigator["device"]["exitApp"])
-			navigator["device"]["exitApp"]();
-		else if (!this.is_arcade && !this.runtime.isDomFree)
-			window.close();
-	};
-	Acts.prototype.Focus = function ()
-	{
-		if (this.runtime.isNodeWebkit)
-		{
-			var win = window["nwgui"]["Window"]["get"]();
-			win["focus"]();
-		}
-		else if (!this.is_arcade && !this.runtime.isDomFree)
-			window.focus();
-	};
-	Acts.prototype.Blur = function ()
-	{
-		if (this.runtime.isNodeWebkit)
-		{
-			var win = window["nwgui"]["Window"]["get"]();
-			win["blur"]();
-		}
-		else if (!this.is_arcade && !this.runtime.isDomFree)
-			window.blur();
-	};
-	Acts.prototype.GoBack = function ()
-	{
-		if (navigator["app"] && navigator["app"]["backHistory"])
-			navigator["app"]["backHistory"]();
-		else if (!this.is_arcade && !this.runtime.isDomFree && window.back)
-			window.back();
-	};
-	Acts.prototype.GoForward = function ()
-	{
-		if (!this.is_arcade && !this.runtime.isDomFree && window.forward)
-			window.forward();
-	};
-	Acts.prototype.GoHome = function ()
-	{
-		if (!this.is_arcade && !this.runtime.isDomFree && window.home)
-			window.home();
-	};
-	Acts.prototype.GoToURL = function (url, target)
-	{
-		if (this.runtime.isCocoonJs)
-			CocoonJS["App"]["openURL"](url);
-		else if (this.runtime.isEjecta)
-			ejecta["openURL"](url);
-		else if (this.runtime.isWinJS)
-			Windows["System"]["Launcher"]["launchUriAsync"](new Windows["Foundation"]["Uri"](url));
-		else if (navigator["app"] && navigator["app"]["loadUrl"])
-			navigator["app"]["loadUrl"](url, { "openExternal": true });
-		else if (this.runtime.isCordova)
-			window.open(url, "_system");
-		else if (!this.is_arcade && !this.runtime.isDomFree)
-		{
-			if (target === 2 && !this.is_arcade)		// top
-				window.top.location = url;
-			else if (target === 1 && !this.is_arcade)	// parent
-				window.parent.location = url;
-			else					// self
-				window.location = url;
-		}
-	};
-	Acts.prototype.GoToURLWindow = function (url, tag)
-	{
-		if (this.runtime.isCocoonJs)
-			CocoonJS["App"]["openURL"](url);
-		else if (this.runtime.isEjecta)
-			ejecta["openURL"](url);
-		else if (this.runtime.isWinJS)
-			Windows["System"]["Launcher"]["launchUriAsync"](new Windows["Foundation"]["Uri"](url));
-		else if (navigator["app"] && navigator["app"]["loadUrl"])
-			navigator["app"]["loadUrl"](url, { "openExternal": true });
-		else if (this.runtime.isCordova)
-			window.open(url, "_system");
-		else if (!this.is_arcade && !this.runtime.isDomFree)
-			window.open(url, tag);
-	};
-	Acts.prototype.Reload = function ()
-	{
-		if (!this.is_arcade && !this.runtime.isDomFree)
-			window.location.reload();
-	};
-	var firstRequestFullscreen = true;
-	var crruntime = null;
-	function onFullscreenError(e)
-	{
-		if (console && console.warn)
-			console.warn("Fullscreen request failed: ", e);
-		crruntime["setSize"](window.innerWidth, window.innerHeight);
-	};
-	Acts.prototype.RequestFullScreen = function (stretchmode)
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Requesting fullscreen is not supported on this platform - the request has been ignored");
-			return;
-		}
-		if (stretchmode >= 2)
-			stretchmode += 1;
-		if (stretchmode === 6)
-			stretchmode = 2;
-		if (this.runtime.isNodeWebkit)
-		{
-			if (this.runtime.isDebug)
-			{
-				debuggerFullscreen(true);
-			}
-			else if (!this.runtime.isNodeFullscreen && window["nwgui"])
-			{
-				window["nwgui"]["Window"]["get"]()["enterFullscreen"]();
-				this.runtime.isNodeFullscreen = true;
-				this.runtime.fullscreen_scaling = (stretchmode >= 2 ? stretchmode : 0);
-			}
-		}
-		else
-		{
-			if (document["mozFullScreen"] || document["webkitIsFullScreen"] || !!document["msFullscreenElement"] || document["fullScreen"] || document["fullScreenElement"])
-			{
-				return;
-			}
-			this.runtime.fullscreen_scaling = (stretchmode >= 2 ? stretchmode : 0);
-			var elem = this.runtime.canvasdiv || this.runtime.canvas;
-			if (firstRequestFullscreen)
-			{
-				firstRequestFullscreen = false;
-				crruntime = this.runtime;
-				elem.addEventListener("mozfullscreenerror", onFullscreenError);
-				elem.addEventListener("webkitfullscreenerror", onFullscreenError);
-				elem.addEventListener("MSFullscreenError", onFullscreenError);
-				elem.addEventListener("fullscreenerror", onFullscreenError);
-			}
-			if (elem["requestFullscreen"])
-				elem["requestFullscreen"]();
-			else if (elem["mozRequestFullScreen"])
-				elem["mozRequestFullScreen"]();
-			else if (elem["msRequestFullscreen"])
-				elem["msRequestFullscreen"]();
-			else if (elem["webkitRequestFullScreen"])
-			{
-				if (typeof Element !== "undefined" && typeof Element["ALLOW_KEYBOARD_INPUT"] !== "undefined")
-					elem["webkitRequestFullScreen"](Element["ALLOW_KEYBOARD_INPUT"]);
-				else
-					elem["webkitRequestFullScreen"]();
-			}
-		}
-	};
-	Acts.prototype.CancelFullScreen = function ()
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Exiting fullscreen is not supported on this platform - the request has been ignored");
-			return;
-		}
-		if (this.runtime.isNodeWebkit)
-		{
-			if (this.runtime.isDebug)
-			{
-				debuggerFullscreen(false);
-			}
-			else if (this.runtime.isNodeFullscreen && window["nwgui"])
-			{
-				window["nwgui"]["Window"]["get"]()["leaveFullscreen"]();
-				this.runtime.isNodeFullscreen = false;
-			}
-		}
-		else
-		{
-			if (document["exitFullscreen"])
-				document["exitFullscreen"]();
-			else if (document["mozCancelFullScreen"])
-				document["mozCancelFullScreen"]();
-			else if (document["msExitFullscreen"])
-				document["msExitFullscreen"]();
-			else if (document["webkitCancelFullScreen"])
-				document["webkitCancelFullScreen"]();
-		}
-	};
-	Acts.prototype.Vibrate = function (pattern_)
-	{
-		try {
-			var arr = pattern_.split(",");
-			var i, len;
-			for (i = 0, len = arr.length; i < len; i++)
-			{
-				arr[i] = parseInt(arr[i], 10);
-			}
-			if (navigator["vibrate"])
-				navigator["vibrate"](arr);
-			else if (navigator["mozVibrate"])
-				navigator["mozVibrate"](arr);
-			else if (navigator["webkitVibrate"])
-				navigator["webkitVibrate"](arr);
-			else if (navigator["msVibrate"])
-				navigator["msVibrate"](arr);
-		}
-		catch (e) {}
-	};
-	Acts.prototype.InvokeDownload = function (url_, filename_)
-	{
-		var a = document.createElement("a");
-		if (typeof a["download"] === "undefined")
-		{
-			window.open(url_);
-		}
-		else
-		{
-			var body = document.getElementsByTagName("body")[0];
-			a.textContent = filename_;
-			a.href = url_;
-			a["download"] = filename_;
-			body.appendChild(a);
-			var clickEvent = new MouseEvent("click");
-			a.dispatchEvent(clickEvent);
-			body.removeChild(a);
-		}
-	};
-	Acts.prototype.InvokeDownloadString = function (str_, mimetype_, filename_)
-	{
-		var datauri = "data:" + mimetype_ + "," + encodeURIComponent(str_);
-		var a = document.createElement("a");
-		if (typeof a["download"] === "undefined")
-		{
-			window.open(datauri);
-		}
-		else
-		{
-			var body = document.getElementsByTagName("body")[0];
-			a.textContent = filename_;
-			a.href = datauri;
-			a["download"] = filename_;
-			body.appendChild(a);
-			var clickEvent = new MouseEvent("click");
-			a.dispatchEvent(clickEvent);
-			body.removeChild(a);
-		}
-	};
-	Acts.prototype.ConsoleLog = function (type_, msg_)
-	{
-		if (typeof console === "undefined")
-			return;
-		if (type_ === 0 && console.log)
-			console.log(msg_.toString());
-		if (type_ === 1 && console.warn)
-			console.warn(msg_.toString());
-		if (type_ === 2 && console.error)
-			console.error(msg_.toString());
-	};
-	Acts.prototype.ConsoleGroup = function (name_)
-	{
-		if (console && console.group)
-			console.group(name_);
-	};
-	Acts.prototype.ConsoleGroupEnd = function ()
-	{
-		if (console && console.groupEnd)
-			console.groupEnd();
-	};
-	Acts.prototype.ExecJs = function (js_)
-	{
-		try {
-			if (eval)
-				eval(js_);
-		}
-		catch (e)
-		{
-			if (console && console.error)
-				console.error("Error executing Javascript: ", e);
-		}
-	};
-	var orientations = [
-		"portrait",
-		"landscape",
-		"portrait-primary",
-		"portrait-secondary",
-		"landscape-primary",
-		"landscape-secondary"
-	];
-	Acts.prototype.LockOrientation = function (o)
-	{
-		o = Math.floor(o);
-		if (o < 0 || o >= orientations.length)
-			return;
-		this.runtime.autoLockOrientation = false;
-		var orientation = orientations[o];
-		if (screen["orientation"] && screen["orientation"]["lock"])
-			screen["orientation"]["lock"](orientation);
-		else if (screen["lockOrientation"])
-			screen["lockOrientation"](orientation);
-		else if (screen["webkitLockOrientation"])
-			screen["webkitLockOrientation"](orientation);
-		else if (screen["mozLockOrientation"])
-			screen["mozLockOrientation"](orientation);
-		else if (screen["msLockOrientation"])
-			screen["msLockOrientation"](orientation);
-	};
-	Acts.prototype.UnlockOrientation = function ()
-	{
-		this.runtime.autoLockOrientation = false;
-		if (screen["orientation"] && screen["orientation"]["unlock"])
-			screen["orientation"]["unlock"]();
-		else if (screen["unlockOrientation"])
-			screen["unlockOrientation"]();
-		else if (screen["webkitUnlockOrientation"])
-			screen["webkitUnlockOrientation"]();
-		else if (screen["mozUnlockOrientation"])
-			screen["mozUnlockOrientation"]();
-		else if (screen["msUnlockOrientation"])
-			screen["msUnlockOrientation"]();
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.URL = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : window.location.toString());
-	};
-	Exps.prototype.Protocol = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : window.location.protocol);
-	};
-	Exps.prototype.Domain = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : window.location.hostname);
-	};
-	Exps.prototype.PathName = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : window.location.pathname);
-	};
-	Exps.prototype.Hash = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : window.location.hash);
-	};
-	Exps.prototype.Referrer = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : document.referrer);
-	};
-	Exps.prototype.Title = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : document.title);
-	};
-	Exps.prototype.Name = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : navigator.appName);
-	};
-	Exps.prototype.Version = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : navigator.appVersion);
-	};
-	Exps.prototype.Language = function (ret)
-	{
-		if (navigator && navigator.language)
-			ret.set_string(navigator.language);
-		else
-			ret.set_string("");
-	};
-	Exps.prototype.Platform = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : navigator.platform);
-	};
-	Exps.prototype.Product = function (ret)
-	{
-		if (navigator && navigator.product)
-			ret.set_string(navigator.product);
-		else
-			ret.set_string("");
-	};
-	Exps.prototype.Vendor = function (ret)
-	{
-		if (navigator && navigator.vendor)
-			ret.set_string(navigator.vendor);
-		else
-			ret.set_string("");
-	};
-	Exps.prototype.UserAgent = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : navigator.userAgent);
-	};
-	Exps.prototype.QueryString = function (ret)
-	{
-		ret.set_string(this.runtime.isDomFree ? "" : window.location.search);
-	};
-	Exps.prototype.QueryParam = function (ret, paramname)
-	{
-		if (this.runtime.isDomFree)
-		{
-			ret.set_string("");
-			return;
-		}
-		var match = RegExp('[?&]' + paramname + '=([^&]*)').exec(window.location.search);
-		if (match)
-			ret.set_string(decodeURIComponent(match[1].replace(/\+/g, ' ')));
-		else
-			ret.set_string("");
-	};
-	Exps.prototype.Bandwidth = function (ret)
-	{
-		var connection = navigator["connection"] || navigator["mozConnection"] || navigator["webkitConnection"];
-		if (!connection)
-			ret.set_float(Number.POSITIVE_INFINITY);
-		else
-		{
-			if (typeof connection["bandwidth"] !== "undefined")
-				ret.set_float(connection["bandwidth"]);
-			else if (typeof connection["downlinkMax"] !== "undefined")
-				ret.set_float(connection["downlinkMax"]);
-			else
-				ret.set_float(Number.POSITIVE_INFINITY);
-		}
-	};
-	Exps.prototype.ConnectionType = function (ret)
-	{
-		var connection = navigator["connection"] || navigator["mozConnection"] || navigator["webkitConnection"];
-		if (!connection)
-			ret.set_string("unknown");
-		else
-		{
-			ret.set_string(connection["type"] || "unknown");
-		}
-	};
-	Exps.prototype.BatteryLevel = function (ret)
-	{
-		var battery = navigator["battery"] || navigator["mozBattery"] || navigator["webkitBattery"];
-		if (battery)
-		{
-			ret.set_float(battery["level"]);
-		}
-		else
-		{
-			maybeLoadBatteryManager();
-			if (batteryManager)
-			{
-				ret.set_float(batteryManager["level"]);
-			}
-			else
-			{
-				ret.set_float(1);		// not supported/unknown: assume charged
-			}
-		}
-	};
-	Exps.prototype.BatteryTimeLeft = function (ret)
-	{
-		var battery = navigator["battery"] || navigator["mozBattery"] || navigator["webkitBattery"];
-		if (battery)
-		{
-			ret.set_float(battery["dischargingTime"]);
-		}
-		else
-		{
-			maybeLoadBatteryManager();
-			if (batteryManager)
-			{
-				ret.set_float(batteryManager["dischargingTime"]);
-			}
-			else
-			{
-				ret.set_float(Number.POSITIVE_INFINITY);		// not supported/unknown: assume infinite time left
-			}
-		}
-	};
-	Exps.prototype.ExecJS = function (ret, js_)
-	{
-		if (!eval)
-		{
-			ret.set_any(0);
-			return;
-		}
-		var result = 0;
-		try {
-			result = eval(js_);
-		}
-		catch (e)
-		{
-			if (console && console.error)
-				console.error("Error executing Javascript: ", e);
-		}
-		if (typeof result === "number")
-			ret.set_any(result);
-		else if (typeof result === "string")
-			ret.set_any(result);
-		else if (typeof result === "boolean")
-			ret.set_any(result ? 1 : 0);
-		else
-			ret.set_any(0);
-	};
-	Exps.prototype.ScreenWidth = function (ret)
-	{
-		ret.set_int(screen.width);
-	};
-	Exps.prototype.ScreenHeight = function (ret)
-	{
-		ret.set_int(screen.height);
-	};
-	Exps.prototype.DevicePixelRatio = function (ret)
-	{
-		ret.set_float(this.runtime.devicePixelRatio);
-	};
-	Exps.prototype.WindowInnerWidth = function (ret)
-	{
-		ret.set_int(window.innerWidth);
-	};
-	Exps.prototype.WindowInnerHeight = function (ret)
-	{
-		ret.set_int(window.innerHeight);
-	};
-	Exps.prototype.WindowOuterWidth = function (ret)
-	{
-		ret.set_int(window.outerWidth);
-	};
-	Exps.prototype.WindowOuterHeight = function (ret)
-	{
-		ret.set_int(window.outerHeight);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.Button = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.Button.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function()
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Button plugin not supported on this platform - the object will not be created");
-			return;
-		}
-		this.isCheckbox = (this.properties[0] === 1);
-		this.inputElem = document.createElement("input");
-		if (this.isCheckbox)
-			this.elem = document.createElement("label");
-		else
-			this.elem = this.inputElem;
-		this.labelText = null;
-		this.inputElem.type = (this.isCheckbox ? "checkbox" : "button");
-		this.inputElem.id = this.properties[6];
-		jQuery(this.elem).appendTo(this.runtime.canvasdiv ? this.runtime.canvasdiv : "body");
-		if (this.isCheckbox)
-		{
-			jQuery(this.inputElem).appendTo(this.elem);
-			this.labelText = document.createTextNode(this.properties[1]);
-			jQuery(this.elem).append(this.labelText);
-			this.inputElem.checked = (this.properties[7] !== 0);
-			jQuery(this.elem).css("font-family", "sans-serif");
-			jQuery(this.elem).css("display", "inline-block");
-			jQuery(this.elem).css("color", "black");
-		}
-		else
-			this.inputElem.value = this.properties[1];
-		this.elem.title = this.properties[2];
-		this.inputElem.disabled = (this.properties[4] === 0);
-		this.autoFontSize = (this.properties[5] !== 0);
-		this.element_hidden = false;
-		if (this.properties[3] === 0)
-		{
-			jQuery(this.elem).hide();
-			this.visible = false;
-			this.element_hidden = true;
-		}
-		this.inputElem.onclick = (function (self) {
-			return function(e) {
-				e.stopPropagation();
-				self.runtime.isInUserInputEvent = true;
-				self.runtime.trigger(cr.plugins_.Button.prototype.cnds.OnClicked, self);
-				self.runtime.isInUserInputEvent = false;
-			};
-		})(this);
-		this.elem.addEventListener("touchstart", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchmove", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchend", function (e) {
-			e.stopPropagation();
-		}, false);
-		jQuery(this.elem).mousedown(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).mouseup(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).keydown(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).keyup(function (e) {
-			e.stopPropagation();
-		});
-		this.lastLeft = 0;
-		this.lastTop = 0;
-		this.lastRight = 0;
-		this.lastBottom = 0;
-		this.lastWinWidth = 0;
-		this.lastWinHeight = 0;
-		this.updatePosition(true);
 		this.runtime.tickMe(this);
+		this.my_timescale = -1.0;
 	};
 	instanceProto.saveToJSON = function ()
 	{
-		var o = {
-			"tooltip": this.elem.title,
-			"disabled": !!this.inputElem.disabled
-		};
-		if (this.isCheckbox)
+		if (null != this.transCamera)
 		{
-			o["checked"] = !!this.inputElem.checked;
-			o["text"] = this.labelText.nodeValue;
+			this.localCameras.push(this.transCamera);
+		}
+		var o = {
+			"lcc": this.localCameraCount,
+			"olcc": this.localCameraCountOld,
+			"alcc": this.localCameras.length,
+			"agcc": this.globalCameras.length,
+			"tcnn": (this.transCamera == null ? false : true)
+		};
+		for (var i = 0; i < this.localCameras.length; i++)
+		{
+			o["lc" + i + "g"] = this.localCameras[i].global;
+			o["lc" + i + "n"] = this.localCameras[i].name;
+			o["lc" + i + "x"] = this.localCameras[i].x;
+			o["lc" + i + "y"] = this.localCameras[i].y;
+			o["lc" + i + "s"] = this.localCameras[i].scale;
+			o["lc" + i + "f"] = this.localCameras[i].following;
+			o["lc" + i + "foc"] = this.localCameras[i].followedObjects.length;
+			for (var f = 0; f < this.localCameras[i].followedObjects.length; f++)
+			{
+				o["lc" + i + "fo" + f] = this.localCameras[i].followedObjects[f].uid;
+			}
+			for (var w = 0; w < this.localCameras[i].objectWeights.length; w++)
+			{
+				o["lc" + i + "fow" + w] = this.localCameras[i].objectWeights[w];
+			}
+			for (var ip = 0; ip < this.localCameras[i].followedObjectIPs.length; ip++)
+			{
+				o["lc" + i + "foip" + ip] = this.localCameras[i].followedObjectIPs[ip];
+			}
+			o["lc" + i + "fl"] = this.localCameras[i].followLag;
+			o["lc" + i + "ztc"] = this.localCameras[i].zoomToContain;
+			o["lc" + i + "zmh"] = this.localCameras[i].zoomMarginH;
+			o["lc" + i + "zmv"] = this.localCameras[i].zoomMarginV;
+			o["lc" + i + "zbu"] = this.localCameras[i].zoomBoundU;
+			o["lc" + i + "zbl"] = this.localCameras[i].zoomBoundL;
+			o["lc" + i + "tc"] = this.localCameras[i].transitions.length;
+			for (var t = 0; t < this.localCameras[i].transitions.length; t++)
+			{
+				o["lc" + i + "t" + t + "tp"] = this.localCameras[i].transitions[t].type;
+				o["lc" + i + "t" + t + "d"] = this.localCameras[i].transitions[t].duration;
+				o["lc" + i + "t" + t + "p1"] = this.localCameras[i].transitions[t].param1;
+				o["lc" + i + "t" + t + "p2"] = this.localCameras[i].transitions[t].param2;
+				o["lc" + i + "t" + t + "p3"] = this.localCameras[i].transitions[t].param3;
+				o["lc" + i + "t" + t + "p4"] = this.localCameras[i].transitions[t].param4;
+				o["lc" + i + "t" + t + "pr"] = this.localCameras[i].transitions[t].progress;
+			}
+			o["lc" + i + "mtf"] = this.localCameras[i].moveTransFinished;
+			o["lc" + i + "ztf"] = this.localCameras[i].zoomTransFinished;
+			o["lc" + i + "csis"] = this.localCameras[i].isShaking;
+			o["lc" + i + "cssx"] = this.localCameras[i].shakeX;
+			o["lc" + i + "cssy"] = this.localCameras[i].shakeY;
+			o["lc" + i + "cssz"] = this.localCameras[i].shakeZoom;
+			o["lc" + i + "csst"] = this.localCameras[i].shakeTimer;
+			o["lc" + i + "csss"] = this.localCameras[i].shakeStrength;
+			o["lc" + i + "cssmd"] = this.localCameras[i].shakeMaxDeviation;
+			o["lc" + i + "cssmzd"] = this.localCameras[i].shakeMaxZoomDeviation;
+			o["lc" + i + "cssl"] = this.localCameras[i].shakeLength;
+			o["lc" + i + "cssbt"] = this.localCameras[i].shakeBuildTime;
+			o["lc" + i + "cssdt"] = this.localCameras[i].shakeDropTime;
+		}
+		for (var i = 0; i < this.globalCameras.length; i++)
+		{
+			o["gc" + i + "g"] = this.globalCameras[i].global;
+			o["gc" + i + "n"] = this.globalCameras[i].name;
+			o["gc" + i + "x"] = this.globalCameras[i].x;
+			o["gc" + i + "y"] = this.globalCameras[i].y;
+			o["gc" + i + "s"] = this.globalCameras[i].scale;
+			o["gc" + i + "f"] = this.globalCameras[i].following;
+			o["gc" + i + "foc"] = this.globalCameras[i].followedObjects.length;
+			for (var f = 0; f < this.globalCameras[i].followedObjects.length; f++)
+			{
+				o["gc" + i + "fo" + f] = this.globalCameras[i].followedObjects[f].uid;
+			}
+			for (var w = 0; w < this.globalCameras[i].objectWeights.length; w++)
+			{
+				o["gc" + i + "fow" + w] = this.globalCameras[i].objectWeights[w];
+			}
+			for (var ip = 0; ip < this.globalCameras[i].followedObjectIPs.length; ip++)
+			{
+				o["gc" + i + "foip" + ip] = this.globalCameras[i].followedObjectIPs[ip];
+			}
+			o["gc" + i + "fl"] = this.globalCameras[i].followLag;
+			o["gc" + i + "ztc"] = this.globalCameras[i].zoomToContain;
+			o["gc" + i + "zmh"] = this.globalCameras[i].zoomMarginH;
+			o["gc" + i + "zmv"] = this.globalCameras[i].zoomMarginV;
+			o["gc" + i + "zbu"] = this.globalCameras[i].zoomBoundU;
+			o["gc" + i + "zbl"] = this.globalCameras[i].zoomBoundL;
+			o["gc" + i + "tc"] = this.globalCameras[i].transitions.length;
+			for (var t = 0; t < this.globalCameras[i].transitions.length; t++)
+			{
+				o["gc" + i + "t" + t + "tp"] = this.globalCameras[i].transitions[t].type;
+				o["gc" + i + "t" + t + "d"] = this.globalCameras[i].transitions[t].duration;
+				o["gc" + i + "t" + t + "p1"] = this.globalCameras[i].transitions[t].param1;
+				o["gc" + i + "t" + t + "p2"] = this.globalCameras[i].transitions[t].param2;
+				o["gc" + i + "t" + t + "p3"] = this.globalCameras[i].transitions[t].param3;
+				o["gc" + i + "t" + t + "p4"] = this.globalCameras[i].transitions[t].param4;
+			}
+			o["gc" + i + "mtf"] = this.globalCameras[i].moveTransFinished;
+			o["gc" + i + "ztf"] = this.globalCameras[i].zoomTransFinished;
+			o["gc" + i + "csis"] = this.globalCameras[i].isShaking;
+			o["gc" + i + "cssx"] = this.globalCameras[i].shakeX;
+			o["gc" + i + "cssy"] = this.globalCameras[i].shakeY;
+			o["gc" + i + "cssz"] = this.globalCameras[i].shakeZoom;
+			o["gc" + i + "csst"] = this.globalCameras[i].shakeTimer;
+			o["gc" + i + "csss"] = this.globalCameras[i].shakeStrength;
+			o["gc" + i + "cssmd"] = this.globalCameras[i].shakeMaxDeviation;
+			o["gc" + i + "cssmzd"] = this.globalCameras[i].shakeMaxZoomDeviation;
+			o["gc" + i + "cssl"] = this.globalCameras[i].shakeLength;
+			o["gc" + i + "cssbt"] = this.globalCameras[i].shakeBuildTime;
+			o["gc" + i + "cssdt"] = this.globalCameras[i].shakeDropTime;
+		}
+		if (null != this.activeCamera)
+		{
+			o["ac"] = this.activeCamera.name;
 		}
 		else
 		{
-			o["text"] = this.elem.value;
+			o["ac"] = "null";
+		}
+		if (null != this.transTarget)
+		{
+			o["tt"] = this.transTarget.name;
 		}
 		return o;
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.elem.title = o["tooltip"];
-		this.inputElem.disabled = o["disabled"];
-		if (this.isCheckbox)
-		{
-			this.inputElem.checked = o["checked"];
-			this.labelText.nodeValue = o["text"];
-		}
-		else
-		{
-			this.elem.value = o["text"];
-		}
-	};
-	instanceProto.onDestroy = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).remove();
-		this.elem = null;
-	};
-	instanceProto.tick = function ()
-	{
-		this.updatePosition();
-	};
-	var last_canvas_offset = null;
-	var last_checked_tick = -1;
-	instanceProto.updatePosition = function (first)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		var left = this.layer.layerToCanvas(this.x, this.y, true);
-		var top = this.layer.layerToCanvas(this.x, this.y, false);
-		var right = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, true);
-		var bottom = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, false);
-		var rightEdge = this.runtime.width / this.runtime.devicePixelRatio;
-		var bottomEdge = this.runtime.height / this.runtime.devicePixelRatio;
-		if (!this.visible || !this.layer.visible || right <= 0 || bottom <= 0 || left >= rightEdge || top >= bottomEdge)
-		{
-			if (!this.element_hidden)
-				jQuery(this.elem).hide();
-			this.element_hidden = true;
-			return;
-		}
-		if (left < 1)
-			left = 1;
-		if (top < 1)
-			top = 1;
-		if (right >= rightEdge)
-			right = rightEdge - 1;
-		if (bottom >= bottomEdge)
-			bottom = bottomEdge - 1;
-		var curWinWidth = window.innerWidth;
-		var curWinHeight = window.innerHeight;
-		if (!first && this.lastLeft === left && this.lastTop === top && this.lastRight === right && this.lastBottom === bottom && this.lastWinWidth === curWinWidth && this.lastWinHeight === curWinHeight)
-		{
-			if (this.element_hidden)
-			{
-				jQuery(this.elem).show();
-				this.element_hidden = false;
-			}
-			return;
-		}
-		this.lastLeft = left;
-		this.lastTop = top;
-		this.lastRight = right;
-		this.lastBottom = bottom;
-		this.lastWinWidth = curWinWidth;
-		this.lastWinHeight = curWinHeight;
-		if (this.element_hidden)
-		{
-			jQuery(this.elem).show();
-			this.element_hidden = false;
-		}
-		var offx = Math.round(left) + jQuery(this.runtime.canvas).offset().left;
-		var offy = Math.round(top) + jQuery(this.runtime.canvas).offset().top;
-		jQuery(this.elem).css("position", "absolute");
-		jQuery(this.elem).offset({left: offx, top: offy});
-		jQuery(this.elem).width(Math.round(right - left));
-		jQuery(this.elem).height(Math.round(bottom - top));
-		if (this.autoFontSize)
-			jQuery(this.elem).css("font-size", ((this.layer.getScale(true) / this.runtime.devicePixelRatio) - 0.2) + "em");
-	};
-	instanceProto.draw = function(ctx)
-	{
-	};
-	instanceProto.drawGL = function(glw)
-	{
-	};
-	function Cnds() {};
-	Cnds.prototype.OnClicked = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.IsChecked = function ()
-	{
-		return this.isCheckbox && this.inputElem.checked;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetText = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		if (this.isCheckbox)
-			this.labelText.nodeValue = text;
-		else
-			this.elem.value = text;
-	};
-	Acts.prototype.SetTooltip = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.title = text;
-	};
-	Acts.prototype.SetVisible = function (vis)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.visible = (vis !== 0);
-	};
-	Acts.prototype.SetEnabled = function (en)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.inputElem.disabled = (en === 0);
-	};
-	Acts.prototype.SetFocus = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.inputElem.focus();
-	};
-	Acts.prototype.SetBlur = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.inputElem.blur();
-	};
-	Acts.prototype.SetCSSStyle = function (p, v)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).css(p, v);
-	};
-	Acts.prototype.SetChecked = function (c)
-	{
-		if (this.runtime.isDomFree || !this.isCheckbox)
-			return;
-		this.inputElem.checked = (c === 1);
-	};
-	Acts.prototype.ToggleChecked = function ()
-	{
-		if (this.runtime.isDomFree || !this.isCheckbox)
-			return;
-		this.inputElem.checked = !this.inputElem.checked;
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.Keyboard = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.Keyboard.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-		this.keyMap = new Array(256);	// stores key up/down state
-		this.usedKeys = new Array(256);
-		this.triggerKey = 0;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function()
-	{
-		var self = this;
-		if (!this.runtime.isDomFree)
-		{
-			jQuery(document).keydown(
-				function(info) {
-					self.onKeyDown(info);
-				}
-			);
-			jQuery(document).keyup(
-				function(info) {
-					self.onKeyUp(info);
-				}
-			);
-		}
-	};
-	var keysToBlockWhenFramed = [32, 33, 34, 35, 36, 37, 38, 39, 40, 44];
-	instanceProto.onKeyDown = function (info)
-	{
-		var alreadyPreventedDefault = false;
-		if (window != window.top && keysToBlockWhenFramed.indexOf(info.which) > -1)
-		{
-			info.preventDefault();
-			alreadyPreventedDefault = true;
-			info.stopPropagation();
-		}
-		if (this.keyMap[info.which])
-		{
-			if (this.usedKeys[info.which] && !alreadyPreventedDefault)
-				info.preventDefault();
-			return;
-		}
-		this.keyMap[info.which] = true;
-		this.triggerKey = info.which;
-		this.runtime.isInUserInputEvent = true;
-		this.runtime.trigger(cr.plugins_.Keyboard.prototype.cnds.OnAnyKey, this);
-		var eventRan = this.runtime.trigger(cr.plugins_.Keyboard.prototype.cnds.OnKey, this);
-		var eventRan2 = this.runtime.trigger(cr.plugins_.Keyboard.prototype.cnds.OnKeyCode, this);
-		this.runtime.isInUserInputEvent = false;
-		if (eventRan || eventRan2)
-		{
-			this.usedKeys[info.which] = true;
-			if (!alreadyPreventedDefault)
-				info.preventDefault();
-		}
-	};
-	instanceProto.onKeyUp = function (info)
-	{
-		this.keyMap[info.which] = false;
-		this.triggerKey = info.which;
-		this.runtime.isInUserInputEvent = true;
-		this.runtime.trigger(cr.plugins_.Keyboard.prototype.cnds.OnAnyKeyReleased, this);
-		var eventRan = this.runtime.trigger(cr.plugins_.Keyboard.prototype.cnds.OnKeyReleased, this);
-		var eventRan2 = this.runtime.trigger(cr.plugins_.Keyboard.prototype.cnds.OnKeyCodeReleased, this);
-		this.runtime.isInUserInputEvent = false;
-		if (eventRan || eventRan2 || this.usedKeys[info.which])
-		{
-			this.usedKeys[info.which] = true;
-			info.preventDefault();
-		}
-	};
-	instanceProto.onWindowBlur = function ()
-	{
-		var i;
-		for (i = 0; i < 256; ++i)
-		{
-			if (!this.keyMap[i])
-				continue;		// key already up
-			this.keyMap[i] = false;
-			this.triggerKey = i;
-			this.runtime.trigger(cr.plugins_.Keyboard.prototype.cnds.OnAnyKeyReleased, this);
-			var eventRan = this.runtime.trigger(cr.plugins_.Keyboard.prototype.cnds.OnKeyReleased, this);
-			var eventRan2 = this.runtime.trigger(cr.plugins_.Keyboard.prototype.cnds.OnKeyCodeReleased, this);
-			if (eventRan || eventRan2)
-				this.usedKeys[i] = true;
-		}
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		return { "triggerKey": this.triggerKey };
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.triggerKey = o["triggerKey"];
-	};
-	function Cnds() {};
-	Cnds.prototype.IsKeyDown = function(key)
-	{
-		return this.keyMap[key];
-	};
-	Cnds.prototype.OnKey = function(key)
-	{
-		return (key === this.triggerKey);
-	};
-	Cnds.prototype.OnAnyKey = function(key)
-	{
-		return true;
-	};
-	Cnds.prototype.OnAnyKeyReleased = function(key)
-	{
-		return true;
-	};
-	Cnds.prototype.OnKeyReleased = function(key)
-	{
-		return (key === this.triggerKey);
-	};
-	Cnds.prototype.IsKeyCodeDown = function(key)
-	{
-		key = Math.floor(key);
-		if (key < 0 || key >= this.keyMap.length)
-			return false;
-		return this.keyMap[key];
-	};
-	Cnds.prototype.OnKeyCode = function(key)
-	{
-		return (key === this.triggerKey);
-	};
-	Cnds.prototype.OnKeyCodeReleased = function(key)
-	{
-		return (key === this.triggerKey);
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.LastKeyCode = function (ret)
-	{
-		ret.set_int(this.triggerKey);
-	};
-	function fixedStringFromCharCode(kc)
-	{
-		kc = Math.floor(kc);
-		switch (kc) {
-		case 8:		return "backspace";
-		case 9:		return "tab";
-		case 13:	return "enter";
-		case 16:	return "shift";
-		case 17:	return "control";
-		case 18:	return "alt";
-		case 19:	return "pause";
-		case 20:	return "capslock";
-		case 27:	return "esc";
-		case 33:	return "pageup";
-		case 34:	return "pagedown";
-		case 35:	return "end";
-		case 36:	return "home";
-		case 37:	return "←";
-		case 38:	return "↑";
-		case 39:	return "→";
-		case 40:	return "↓";
-		case 45:	return "insert";
-		case 46:	return "del";
-		case 91:	return "left window key";
-		case 92:	return "right window key";
-		case 93:	return "select";
-		case 96:	return "numpad 0";
-		case 97:	return "numpad 1";
-		case 98:	return "numpad 2";
-		case 99:	return "numpad 3";
-		case 100:	return "numpad 4";
-		case 101:	return "numpad 5";
-		case 102:	return "numpad 6";
-		case 103:	return "numpad 7";
-		case 104:	return "numpad 8";
-		case 105:	return "numpad 9";
-		case 106:	return "numpad *";
-		case 107:	return "numpad +";
-		case 109:	return "numpad -";
-		case 110:	return "numpad .";
-		case 111:	return "numpad /";
-		case 112:	return "F1";
-		case 113:	return "F2";
-		case 114:	return "F3";
-		case 115:	return "F4";
-		case 116:	return "F5";
-		case 117:	return "F6";
-		case 118:	return "F7";
-		case 119:	return "F8";
-		case 120:	return "F9";
-		case 121:	return "F10";
-		case 122:	return "F11";
-		case 123:	return "F12";
-		case 144:	return "numlock";
-		case 145:	return "scroll lock";
-		case 186:	return ";";
-		case 187:	return "=";
-		case 188:	return ",";
-		case 189:	return "-";
-		case 190:	return ".";
-		case 191:	return "/";
-		case 192:	return "'";
-		case 219:	return "[";
-		case 220:	return "\\";
-		case 221:	return "]";
-		case 222:	return "#";
-		case 223:	return "`";
-		default:	return String.fromCharCode(kc);
-		}
-	};
-	Exps.prototype.StringFromKeyCode = function (ret, kc)
-	{
-		ret.set_string(fixedStringFromCharCode(kc));
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-var Photon = this["Photon"];
-var Exitgames = this["Exitgames"];
-cr.plugins_.Photon = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.Photon.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.createLBC = function()
-	{
-		Photon["LoadBalancing"]["LoadBalancingClient"].prototype["roomFactory"] = function(name) {
-			var r = new Photon["LoadBalancing"]["Room"](name);
-			r["onPropertiesChange"] = function (changedCustomProps, byClient) {
-				self.changedPropertiesNames = [];
-				for(var i in changedCustomProps) {
-					self.changedPropertiesNames.push(i);
-				}
-			};
-			return r;
-		};
-		Photon["LoadBalancing"]["LoadBalancingClient"].prototype["actorFactory"] = function(name, actorNr, isLocal) {
-			var a = new Photon["LoadBalancing"]["Actor"](name, actorNr, isLocal);
-			a["onPropertiesChange"] = function (changedCustomProps, byClient) {
-				self.changedPropertiesNames = [];
-				for(var i in changedCustomProps) {
-					self.changedPropertiesNames.push(i);
-				}
-			};
-			return a;
-		};
-		Exitgames["Common"]["Logger"]["setExceptionHandler"](function(code, message) {
-			self.errorCode = code;
-			self.errorMsg = message;
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onError, self);
-			return false;
-		});
-		this.lbc = new Photon["LoadBalancing"]["LoadBalancingClient"](this.Protocol, this.AppId, this.AppVersion);
-		var self = this;
-		this.lbc["setLogLevel"](this.LogLevel);
-		this.lbc["onError"] = function(errorCode, errorMsg) {
-			self.errorCode = errorCode;
-			self.errorMsg = errorMsg;
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onError, self);
-		};
-		this.lbc["onStateChange"] = function(state) {
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onStateChange, self);
-			var LBC = Photon["LoadBalancing"]["LoadBalancingClient"];
-			switch (state) {
-				case LBC["State"]["JoinedLobby"]:
-					self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onJoinedLobby, self);
-					break;
-				case LBC["State"]["Disconnected"]:
-					self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onDisconnected, self);
-					break;
-				default:
-					break;
-			}
-		};
-		this.lbc["onOperationResponse"] = function (errorCode, errorMsg, code, content) {
-			if (errorCode) {
-				switch (code) {
-					case Photon["LoadBalancing"]["Constants"]["OperationCode"]["JoinRandomGame"]:
-						switch (errorCode) {
-							case Photon["LoadBalancing"]["Constants"]["ErrorCode"]["NoRandomMatchFound"]:
-								self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onJoinRandomRoomNoMatchFound, self);
-								break;
-							default:
-								break;
-						}
-						break;
-					default:
-						self.errorCode = errorCode;
-						self.errorMsg = errorMsg;
-						self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onError, self);
-						break;
-				}
-			}
-		};
-		this.lbc["onEvent"] = function (code, data, actorNr) {
-			self.eventCode = code;
-			self.eventData = data;
-			self.actorNr = actorNr;
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onEvent, self);
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onAnyEvent, self);
-        };
-		this.lbc["onRoomList"] = function (rooms){
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onRoomList, self);
-		};
-        this.lbc["onRoomListUpdate"] = function (rooms, roomsUpdated, roomsAdded, roomsRemoved) {
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onRoomListUpdate, self);
-		};
-        this.lbc["onMyRoomPropertiesChange"] = function () {
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onMyRoomPropertiesChange, self);
-		};
-        this.lbc["onActorPropertiesChange"] = function (actor) {
-			self.actorNr = actor["actorNr"];
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onActorPropertiesChange, self);
-		};
-		this.lbc["onJoinRoom"] = function (createdByMe) {
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onJoinRoom, self);
-		};
-		this.lbc["onActorJoin"] = function (actor) {
-			self.actorNr = actor["actorNr"];
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onActorJoin, self);
-		};
-		this.lbc["onActorLeave"] = function (actor) {
-			self.actorNr = actor["actorNr"];
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onActorLeave, self);
-        };
-		this.lbc["onActorSuspend"] = function (actor) {
-			self.actorNr = actor["actorNr"];
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onActorSuspend, self);
-        };
-		this.lbc["onWebRpcResult"] = function (errorCode, errorMsg, uriPath, resultCode, data) {
-			self.errorCode = errorCode;
-			self.errorMsg = errorMsg;
-			self.webRpcUriPath = uriPath;
-			self.webRpcResultCode = resultCode;
-			self.webRpcData = data;
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onWebRpcResult, self);
-        };
-		this.lbc["onFindFriendsResult"] = function (errorCode, errorMsg, friends) {
-			self.errorCode = errorCode;
-			self.errorMsg = errorMsg;
-			self.friends = friends;
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onFindFriendsResult, self);
-        };
-		this.lbc["onLobbyStats"] = function (errorCode, errorMsg, lobbies) {
-			self.errorCode = errorCode;
-			self.errorMsg = errorMsg;
-			self.lobbyStats = lobbies;
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onLobbyStats, self);
-        };
-		this.lbc["onAppStats"] = function (errorCode, errorMsg, stats) {
-			self.errorCode = errorCode;
-			self.errorMsg = errorMsg;
-			self.appStats = stats;
-			self.runtime.trigger(cr.plugins_.Photon.prototype.cnds.onAppStats, self);
-        };
-    };
-	instanceProto.onCreate = function()
-	{
-		this.AppId = this.properties[0];
-		this.AppVersion = this.properties[1];
-		this.Protocol = ["ws", "wss"][this.properties[2]] == "wss" ? this.Protocol = Photon["ConnectionProtocol"]["Wss"] : Photon["ConnectionProtocol"]["Ws"];
-		this.Region = ["eu", "us", "asia", "jp", "au", "usw", "sa", "cae", "kr", "in", "cn", "ru", "rue"][this.properties[3]];
-		this.SelfHosted = this.properties[4] == 1;
-		this.SelfHostedAddress = this.properties[5];
-		this.LogLevel = this.properties[6] + Exitgames["Common"]["Logger"]["Level"]["DEBUG"]; // list starts from DEBUG = 1
-		this.createLBC();
 	}
-	instanceProto.onDestroy = function ()
-	{
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		return {
-		};
-	};
 	instanceProto.loadFromJSON = function (o)
 	{
+		this.localCameras = [];
+		this.globalCameras = [];
+		this.localCameraCount = o["lcc"];
+		this.localCameraCountOld = o["olcc"];
+		var localCamCount = o["alcc"];
+		for (var i = 0; i < localCamCount; i++)
+		{
+			var tempCam = new Camera("", 0, 0, 0, false);
+			tempCam.global = o["lc" + i + "g"];
+			tempCam.name = o["lc" + i + "n"];
+			tempCam.x = o["lc" + i + "x"];
+			tempCam.y = o["lc" + i + "y"];
+			tempCam.scale = o["lc" + i + "s"];
+			tempCam.following = o["lc" + i + "f"];
+			var foCount = o["lc" + i + "foc"];
+			for (var f = 0; f < foCount; f++)
+			{
+				tempCam.followedObjectUIDs.push(o["lc" + i + "fo" + f]);
+			}
+			for (var w = 0; w < foCount; w++)
+			{
+				tempCam.objectWeights.push(o["lc" + i + "fow" + w]);
+			}
+			for (var ip = 0; ip < foCount; ip++)
+			{
+				tempCam.followedObjectIPs.push(o["lc" + i + "foip" + ip]);
+			}
+			tempCam.followLag = o["lc" + i + "fl"];
+			tempCam.zoomToContain = o["lc" + i + "ztc"];
+			tempCam.zoomMarginH = o["lc" + i + "zmh"];
+			tempCam.zoomMarginV = o["lc" + i + "zmv"];
+			tempCam.zoomBoundU = o["lc" + i + "zbu"];
+			tempCam.zoomBoundL = o["lc" + i + "zbl"];
+			var transCount = o["lc" + i + "tc"];
+			for (var t = 0; t < transCount; t++)
+			{
+				var tempTrans = new Transition("", 0, 0, 0, 0);
+				tempTrans.type = o["lc" + i + "t" + t + "tp"];
+				tempTrans.duration = o["lc" + i + "t" + t + "d"];
+				tempTrans.param1 = o["lc" + i + "t" + t + "p1"];
+				tempTrans.param2 = o["lc" + i + "t" + t + "p2"];
+				tempTrans.param3 = o["lc" + i + "t" + t + "p3"];
+				tempTrans.param4 = o["lc" + i + "t" + t + "p4"];
+				tempTrans.progress = o["lc" + i + "t" + t + "pr"];
+				tempCam.transitions.push(tempTrans);
+			}
+			tempCam.moveTransFinished = o["lc" + i + "mtf"];
+			tempCam.zoomTransFinished = o["lc" + i + "ztf"];
+			tempCam.isShaking = o["lc" + i + "csis"];
+			tempCam.shakeX = o["lc" + i + "cssx"];
+			tempCam.shakeY = o["lc" + i + "cssy"];
+			tempCam.shakeZoom = o["lc" + i + "cssz"];
+			tempCam.shakeTimer = o["lc" + i + "csst"];
+			tempCam.shakeStrength = o["lc" + i + "csss"];
+			tempCam.shakeMaxDeviation = o["lc" + i + "cssmd"];
+			tempCam.shakeMaxZoomDeviation = o["lc" + i + "cssmzd"];
+			tempCam.shakeLength = o["lc" + i + "cssl"];
+			tempCam.shakeBuildTime = o["lc" + i + "cssbt"];
+			tempCam.shakeDropTime = o["lc" + i + "cssdt"];
+			this.localCameras.push(tempCam);
+		}
+		var globalCamCount = o["agcc"];
+		for (var i = 0; i < globalCamCount; i++)
+		{
+			var tempCam = new Camera("", 0, 0, 0, false);
+			tempCam.global = o["gc" + i + "g"];
+			tempCam.name = o["gc" + i + "n"];
+			tempCam.x = o["gc" + i + "x"];
+			tempCam.y = o["gc" + i + "y"];
+			tempCam.scale = o["gc" + i + "s"];
+			tempCam.following = o["gc" + i + "f"];
+			var foCount = o["gc" + i + "foc"];
+			for (var f = 0; f < foCount; f++)
+			{
+				tempCam.followedObjectUIDs.push(o["gc" + i + "fo" + f]);
+			}
+			for (var w = 0; w < foCount; w++)
+			{
+				tempCam.objectWeights.push(o["gc" + i + "fow" + w]);
+			}
+			for (var ip = 0; ip < foCount; ip++)
+			{
+				tempCam.followedObjectIPs.push(o["gc" + i + "foip" + ip]);
+			}
+			tempCam.followLag = o["gc" + i + "fl"];
+			tempCam.zoomToContain = o["gc" + i + "ztc"];
+			tempCam.zoomMarginH = o["gc" + i + "zmh"];
+			tempCam.zoomMarginV = o["gc" + i + "zmv"];
+			tempCam.zoomBoundU = o["gc" + i + "zbu"];
+			tempCam.zoomBoundL = o["gc" + i + "zbl"];
+			var transCount = o["gc" + i + "tc"];
+			for (var t = 0; t < transCount; t++)
+			{
+				var tempTrans = new Transition("", 0, 0, 0, 0);
+				tempTrans.type = o["gc" + i + "t" + t + "tp"];
+				tempTrans.duration = o["gc" + i + "t" + t + "d"];
+				tempTrans.param1 = o["gc" + i + "t" + t + "p1"];
+				tempTrans.param2 = o["gc" + i + "t" + t + "p2"];
+				tempTrans.param3 = o["gc" + i + "t" + t + "p3"];
+				tempTrans.param4 = o["gc" + i + "t" + t + "p4"];
+				tempCam.transitions.push(tempTrans);
+			}
+			tempCam.moveTransFinished = o["gc" + i + "mtf"];
+			tempCam.zoomTransFinished = o["gc" + i + "ztf"];
+			tempCam.isShaking = o["gc" + i + "csis"];
+			tempCam.shakeX = o["gc" + i + "cssx"];
+			tempCam.shakeY = o["gc" + i + "cssy"];
+			tempCam.shakeZoom = o["gc" + i + "cssz"];
+			tempCam.shakeTimer = o["gc" + i + "csst"];
+			tempCam.shakeStrength = o["gc" + i + "csss"];
+			tempCam.shakeMaxDeviation = o["gc" + i + "cssmd"];
+			tempCam.shakeMaxZoomDeviation = o["gc" + i + "cssmzd"];
+			tempCam.shakeLength = o["gc" + i + "cssl"];
+			tempCam.shakeBuildTime = o["gc" + i + "cssbt"];
+			tempCam.shakeDropTime = o["gc" + i + "cssdt"];
+			this.globalCameras.push(tempCam);
+		}
+		var activeCam = o["ac"];
+		if (activeCam == "null")
+		{
+			this.activeCamera = null;
+		}
+		else
+		{
+			this.activeCamera = this.GetCamera(activeCam);
+		}
+		var hasTransCam = o["tcnn"];
+		if (hasTransCam)
+		{
+			this.transCamera = this.localCameras.pop();
+			this.transTarget = this.GetCamera(o["tt"]);
+		}
+	}
+	instanceProto.afterLoad = function()
+	{
+		for (var i = 0; i < this.localCameras.length; i++)
+		{
+			for (var o = 0; o < this.localCameras[i].followedObjectUIDs.length; o++)
+			{
+				this.localCameras[i].followedObjects.push(this.runtime.getObjectByUID(this.localCameras[i].followedObjectUIDs[o]));
+			}
+		}
+		for (var i = 0; i < this.globalCameras.length; i++)
+		{
+			for (var o = 0; o < this.globalCameras[i].followedObjectUIDs.length; o++)
+			{
+				this.globalCameras[i].followedObjects.push(this.runtime.getObjectByUID(this.globalCameras[i].followedObjectUIDs[o]));
+			}
+		}
+	}
+	instanceProto.onLayoutChange = function()
+	{
+		for (var i = 0; i < this.localCameraCountOld; i++)
+		{
+			this.localCameras.shift();
+		}
+		this.localCameraCount -= this.localCameraCountOld;
+	}
+	instanceProto.tick = function()
+	{
+		this.localCameraCountOld = this.localCameraCount;
+		var dt = this.runtime.getDt(this);
+		if (dt == 0)
+		{
+			dt = 0.1;
+		}
+		for (var i = 0; i < this.globalCameras.length; i++)
+		{
+			this.globalCameras[i].ProcessTransitions(dt);
+			this.globalCameras[i].ProcessFollowing(dt, this.runtime.original_width, this.runtime.original_height, this.runtime.running_layout);
+			this.globalCameras[i].ShakeCamera(dt);
+		}
+		for (var i = 0; i < this.localCameras.length; i++)
+		{
+			this.localCameras[i].ProcessTransitions(dt);
+			this.localCameras[i].ProcessFollowing(dt, this.runtime.original_width, this.runtime.original_height, this.runtime.running_layout);
+			this.localCameras[i].ShakeCamera(dt);
+		}
+		if (null != this.transCamera)
+		{
+			this.transCamera.UpdateCameraTarget(dt, this.transTarget);
+			this.transCamera.ProcessTransitions(dt);
+			if (this.transCamera.moveTransFinished)
+			{
+				this.activeCamera = this.transTarget;
+				this.transCamera = null;
+			}
+		}
+		if (this.activeCamera != null)
+		{
+			this.runtime.running_layout.scrollToX(this.activeCamera.GetX() + this.activeCamera.GetShakeX());
+			this.runtime.running_layout.scrollToY(this.activeCamera.GetY() + this.activeCamera.GetShakeY());
+			this.runtime.running_layout.scale = this.activeCamera.scale + this.activeCamera.shakeZoom;
+			this.runtime.redraw = true;
+		}
 	};
 	instanceProto.draw = function(ctx)
 	{
@@ -19675,392 +15794,365 @@ cr.plugins_.Photon = function(runtime)
 	instanceProto.drawGL = function (glw)
 	{
 	};
-	function Cnds() {}
-	Cnds.prototype.onError 					= function() { return true; };
-	Cnds.prototype.onStateChange 			= function() { return true; };
-	Cnds.prototype.onEvent 					= function(code) { return this.eventCode == code; };
-	Cnds.prototype.onAnyEvent 				= function() { return true; };
-	Cnds.prototype.onRoomList 				= function() { return true; };
-	Cnds.prototype.onRoomListUpdate 		= function() { return true; };
-	Cnds.prototype.onActorPropertiesChange 	= function() { return true; };
-	Cnds.prototype.onMyRoomPropertiesChange = function() { return true; };
-	Cnds.prototype.onJoinRoom 				= function() { return true; };
-	Cnds.prototype.onActorJoin 				= function() { return true; };
-	Cnds.prototype.onActorLeave 			= function() { return true; };
-	Cnds.prototype.onActorSuspend 			= function() { return true; };
-	Cnds.prototype.onWebRpcResult 			= function() { return true; };
-	Cnds.prototype.onFindFriendsResult 		= function() { return true; };
-	Cnds.prototype.onLobbyStats 			= function() { return true; };
-	Cnds.prototype.onAppStats 				= function() { return true; };
-	Cnds.prototype.onJoinedLobby 	 = function() { return true; };
-	Cnds.prototype.onJoinRandomRoomNoMatchFound  = function() { return true; };
-	Cnds.prototype.onDisconnected  = function() { return true; };
-	Cnds.prototype.isConnectedToNameServer = function ()
+	instanceProto.GetCamera = function(Name)
 	{
-		return this.lbc["isConnectedToNameServer"]();
+		if (Name == "")
+		{
+			return this.activeCamera;
+		}
+		for (var i = (this.globalCameras.length - 1) ; i >= 0; i--)
+		{
+			if (this.globalCameras[i].GetName() == Name)
+			{
+				return this.globalCameras[i];
+			}
+		}
+		for (var i = (this.localCameras.length - 1); i >= 0; i--)
+		{
+			if (this.localCameras[i].GetName() == Name)
+			{
+				return this.localCameras[i];
+			}
+		}
+		return null;
 	};
-	Cnds.prototype.isConnectedToMaster = function ()
+	function Cnds() {};
+	Cnds.prototype.TransitionFinished = function (CameraName, Transition)
 	{
-		return this.lbc["isConnectedToMaster"]();
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			if (Transition == 0)
+			{
+				return camera.moveTransFinished;
+			}
+			else if (Transition == 1)
+			{
+				return camera.zoomTransFinished;
+			}
+		}
+		return false;
 	};
-	Cnds.prototype.isInLobby = function ()
+	Cnds.prototype.TransitionIsInProgress = function (CameraName, Transition)
 	{
-		return this.lbc["isInLobby"]();
-	};
-	Cnds.prototype.isJoinedToRoom = function ()
-	{
-		return this.lbc["isJoinedToRoom"]();
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			for (var i = 0; i < camera.transitions.length; i++)
+			{
+				if (camera.transitions[i].type == "MOVE" && Transition == 0)
+				{
+					return true;
+				}
+				else if (camera.transitions[i].type == "SCALE" && Transition == 1)
+				{
+					return true;
+				}
+			}
+		}
+		return false;
 	};
 	pluginProto.cnds = new Cnds();
-	function Acts() {}
-	Acts.prototype.setUserId = function (userId)
+	function Acts() {};
+	Acts.prototype.FollowObject = function (CameraName, FollowedObject, ObjectWeight, ImagePoint)
 	{
-		this.lbc["setUserId"](userId);
-	};
-	Acts.prototype.setCustomAuthentication = function (authParameters, authType)
-	{
-		this.lbc["setCustomAuthentication"](authParameters, authType);
-	};
-	Acts.prototype.setHostingType = function (hostType)
-	{
-		this.SelfHosted = hostType == 1;
-	};
-	Acts.prototype.setSelfHostedAddress = function (address)
-	{
-		this.SelfHostedAddress = address;
-	};
-	Acts.prototype.setRegion = function (region)
-	{
-		this.Region = region;
-	};
-	Acts.prototype.setAppId = function (appId)
-	{
-		this.AppId = appId;
-	};
-	Acts.prototype.setAppVersion = function (version)
-	{
-		this.AppVersion = version;
-	};
-	Acts.prototype.connect = function ()
-	{
-		if (this.SelfHosted) {
-			this.lbc["setMasterServerAddress"](this.SelfHostedAddress);
-			this.lbc["connect"]();
+		if (!FollowedObject)
+		{
+			return;
 		}
-		else {
-			if (this.Region)
-				this.lbc["connectToRegionMaster"](this.Region);
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			var followedObject = FollowedObject.getFirstPicked();
+			if (camera.global && !FollowedObject.global)
+			{
+				alert("MagiCam:\n\nObject not global - global cameras must follow global objects.");
+				return;
+			}
+			camera.followedObjects.push(followedObject);
+			camera.objectWeights.push(ObjectWeight);
+			camera.followedObjectIPs.push(ImagePoint);
+		}
+	};
+	Acts.prototype.SetFollowLag = function (CameraName, FollowLag)
+	{
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			camera.followLag = 1 - FollowLag / 100;
+		}
+	};
+	Acts.prototype.ZoomToContain = function (CameraName, Zoom, ZoomMarginH, ZoomMarginV, ZoomBoundU, ZoomBoundL)
+	{
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			if (Zoom == 0)
+			{
+				camera.zoomToContain = true;
+				camera.zoomMarginH = ZoomMarginH;
+				camera.zoomMarginV = ZoomMarginV;
+				camera.zoomBoundU = ZoomBoundU;
+				camera.zoomBoundL = ZoomBoundL;
+			}
 			else
-				this.lbc["connectToNameServer"]();
+			{
+				camera.zoomToContain = false;
+			}
 		}
 	};
-	Acts.prototype.createRoom = function (name, lobbyName, lobbyType)
+	Acts.prototype.EnableFollowing = function (CameraName, Following)
 	{
-		if (lobbyType == 1)  {
-			lobbyType = Photon["LoadBalancing"]["Constants"]["LobbyType"]["SqlLobby"]; // 2
-		}
-		var options = {
-			"lobbyName": lobbyName,
-			"lobbyType": lobbyType
-		};
-		this.lbc["createRoomFromMy"](name, options);
-	};
-	Acts.prototype.joinRoom = function (name, rejoin, createIfNotExists, lobbyName, lobbyType)
-	{
-		if (lobbyType == 1)  {
-			lobbyType = Photon["LoadBalancing"]["Constants"]["LobbyType"]["SqlLobby"]; // 2
-		}
-		var joinOptions = {
-			"rejoin": rejoin && true,
-			"createIfNotExists": createIfNotExists && true,
-			"lobbyName": lobbyName,
-			"lobbyType": lobbyType
-		};
-		var createOptions = {
-			"lobbyName": lobbyName,
-			"lobbyType": lobbyType
-		};
-		createOptions = this.lbc["copyCreateOptionsFromMyRoom"](createOptions);
-		this.lbc["joinRoom"](name, joinOptions, createOptions);
-	};
-	Acts.prototype.joinRandomRoom = function (matchMyRoom, matchmakingMode, lobbyName, lobbyType, sqlLobbyFilter)
-	{
-		if (lobbyType == 1)  {
-			lobbyType = Photon["LoadBalancing"]["Constants"]["LobbyType"]["SqlLobby"]; // 2
-		}
-		var options = {
-			"matchmakingMode": matchmakingMode,
-			"lobbyName": lobbyName,
-			"lobbyType": lobbyType,
-			"sqlLobbyFilter": sqlLobbyFilter
-		};
-		if (matchMyRoom) {
-			options.expectedCustomRoomProperties = this.lbc["myRoom"]()["_customProperties"];
-			options.expectedMaxPlayers = this.lbc["myRoom"]()["maxPlayers"];
-		}
-		this.lbc["joinRandomRoom"](options);
-	};
-	Acts.prototype.disconnect = function ()
-	{
-		this.lbc["disconnect"]();
-	};
-	Acts.prototype.suspendRoom = function ()
-	{
-		this.lbc["suspendRoom"]();
-	};
-	Acts.prototype.leaveRoom = function ()
-	{
-		this.lbc["leaveRoom"]();
-	};
-	Acts.prototype.raiseEvent = function (eventCode, data, interestGroup, cache, receivers, targetActors, webForward)
-	{
-		var opt = {
-			"interestGroup": interestGroup,
-			"cache": cache,
-			"receivers": receivers,
-			"webForward": webForward
-		};
-		if(typeof(targetActors) === "string" && targetActors) {
-			opt["targetActors"] = targetActors.split(",").map(function(x) { return parseInt(x); } );
-		}
-		this.lbc["raiseEvent"](eventCode, data, opt);
-	};
-	Acts.prototype.changeGroups = function (action, group)
-	{
-		switch (action) {
-			case 0: // Add
-				this.lbc["changeGroups"](null, [group]);
-				break;
-			case 1: // Add all current
-				this.lbc["changeGroups"](null ,[]);
-				break;
-			case 2: // Remove
-				this.lbc["changeGroups"]([group], null);
-				break;
-			case 3: // Remove all
-				this.lbc["changeGroups"]([], null);
-				break;
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			if (Following == 0)
+			{
+				camera.following = true;
+			}
+			else
+			{
+				camera.following = false;
+			}
 		}
 	};
-	Acts.prototype.webRpc = function (uriPath, parameters, parametersType)
+	Acts.prototype.UnfollowObject = function (CameraName, FollowedObject)
 	{
-		this.lbc["webRpc"](uriPath, parametersType ? JSON.parse(parameters) : parameters);
+		if (!FollowedObject)
+		{
+			return;
+		}
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			var followedObject = FollowedObject.getFirstPicked();
+			for (var i = 0; i < camera.followedObjects.length; i++)
+			{
+				if (camera.followedObjects[i] == followedObject)
+				{
+					camera.followedObjects.splice(i, 1);
+					break;
+				}
+			}
+		}
 	};
-	Acts.prototype.findFriends = function (friends)
+	Acts.prototype.CreateLocalCamera = function (cameraName, cameraX, cameraY, cameraScale, Active)
 	{
-		this.lbc["findFriends"](friends.split(","));
+		if (cameraName == "")
+		{
+			alert("Camera name must not be blank.");
+			return;
+		}
+		this.localCameras.push(new Camera(cameraName, cameraX, cameraY, cameraScale, false));
+		this.localCameraCount++;
+		if (Active == 1)
+		{
+			this.activeCamera = this.localCameras[this.localCameras.length - 1];
+			this.runtime.running_layout.scale = this.activeCamera.scale;
+		}
 	};
-	Acts.prototype.requestLobbyStats = function ()
+	Acts.prototype.CreateGlobalCamera = function (cameraName, cameraX, cameraY, cameraScale, Active)
 	{
-		this.lbc["requestLobbyStats"]();
+		if (cameraName == "")
+		{
+			alert("Camera name must not be blank.");
+			return;
+		}
+		else if (this.GetCamera(cameraName) != null)
+		{
+			return;
+		}
+		this.globalCameras.push(new Camera(cameraName, cameraX, cameraY, cameraScale, true));
+		if (Active == 1)
+		{
+			this.activeCamera = this.globalCameras[this.globalCameras.length - 1];
+			this.runtime.running_layout.scrollToX(this.activeCamera.GetX());
+			this.runtime.running_layout.scrollToY(this.activeCamera.GetY());
+			this.runtime.running_layout.scale = this.activeCamera.scale;
+		}
 	};
-	Acts.prototype.setMyActorName = function (name)
+	Acts.prototype.SetActiveCamera = function (CameraName)
 	{
-		this.lbc["myActor"]()["setName"](name);
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			this.activeCamera = camera;
+			this.runtime.running_layout.scrollToX(camera.GetX());
+			this.runtime.running_layout.scrollToY(camera.GetY());
+			this.runtime.running_layout.scale = camera.scale;
+		}
 	};
-	Acts.prototype.setPropertyOfActorByNr = function (nr, propName, propValue, webForward, checkAndSet, expectedValue)
+	Acts.prototype.SetScrollSmoothing = function (CameraName)
 	{
-		this.lbc["myRoomActors"]()[nr]["setCustomProperty"](propName, propValue, webForward, checkAndSet ? expectedValue : undefined);
 	};
-	Acts.prototype.setPropertyOfMyRoom = function (propName, propValue, webForward, checkAndSet, expectedValue)
+	Acts.prototype.SetXPosition = function (CameraName, X)
 	{
-		this.lbc["myRoom"]()["setCustomProperty"](propName, propValue, webForward, checkAndSet ? expectedValue : undefined);
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			camera.SetX(X);
+		}
 	};
-	Acts.prototype.setPropsListedInLobby = function (propNames)
+	Acts.prototype.SetYPosition = function (CameraName, Y)
 	{
-		this.lbc["myRoom"]()["setPropsListedInLobby"](propNames.split(","));
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			camera.SetY(Y);
+		}
 	};
-	Acts.prototype.setMyRoomIsVisible = function (isVisisble)
+	Acts.prototype.SetPosition = function (CameraName, X, Y)
 	{
-		this.lbc["myRoom"]()["setIsVisible"](isVisisble ? true : false);
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			camera.SetX(X);
+			camera.SetY(Y);
+		}
 	};
-	Acts.prototype.setMyRoomIsOpen = function (isOpen)
+	Acts.prototype.SetZoom = function (CameraName, Zoom)
 	{
-		this.lbc["myRoom"]()["setIsOpen"](isOpen ? true : false);
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			camera.scale = Zoom;
+		}
 	};
-	Acts.prototype.setMyRoomMaxPlayers = function (maxPlayers)
+	Acts.prototype.TransitionToPoint = function (CameraName, X, Y, Duration)
 	{
-		this.lbc["myRoom"]()["setMaxPlayers"](maxPlayers);
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			for (var i = 0; i < camera.transitions.length; i++)
+			{
+				if (camera.transitions[i].type == "MOVE")
+				{
+					camera.transitions.splice(i, 1);
+					break;
+				}
+			}
+			camera.transitions.push(new Transition("MOVE", Duration, X, Y, camera.GetX(), camera.GetY()));
+			camera.following = false;
+			camera.zoomToContain = false;
+		}
 	};
-	Acts.prototype.setEmptyRoomLiveTime = function (emptyRoomLiveTime)
+	Acts.prototype.TransitionToZoom = function (CameraName, Zoom, Duration)
 	{
-		this.lbc["myRoom"]()["setEmptyRoomLiveTime"](emptyRoomLiveTime);
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			for (var i = 0; i < camera.transitions.length; i++)
+			{
+				if (camera.transitions[i].type == "SCALE")
+				{
+					camera.transitions.splice(i, 1);
+					break;
+				}
+			}
+			camera.transitions.push(new Transition("SCALE", Duration, Zoom, camera.scale, null, null));
+			camera.zoomToContain = false;
+		}
 	};
-	Acts.prototype.setSuspendedPlayerLiveTime = function (suspendedPlayerLiveTime)
+	Acts.prototype.TransitionToCamera = function (CameraName, Duration)
 	{
-		this.lbc["myRoom"]()["setSuspendedPlayerLiveTime"](suspendedPlayerLiveTime);
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			this.transTarget = camera;
+			this.transCamera = new Camera("transCamera", this.activeCamera.GetX(), this.activeCamera.GetY(), this.activeCamera.scale, false);
+			this.transCamera.transitions.push(new Transition("MOVE", Duration, this.transTarget.GetX(), this.transTarget.GetY(), this.transCamera.GetX(), this.transCamera.GetY()));
+			this.transCamera.transitions.push(new Transition("SCALE", Duration, this.transTarget.scale, this.transCamera.scale, null, null));
+			this.activeCamera = this.transCamera;
+			this.isSwitchingCameras = true;
+		}
 	};
-	Acts.prototype.setUniqueUserId = function (unique)
+	Acts.prototype.ShakeCamera = function (CameraName, Strength, MaxDeviation, MaxZoomDeviation, BuildLength, DropTime, Duration)
 	{
-		this.lbc.logger.error("'Set unique userid check' action is deprecated. Please remove it from project. Rooms always created with 'unique userid check' set to true.");
-	};
-	Acts.prototype.reset = function ()
-	{
-		this.lbc["disconnect"]();
-		this.createLBC();
-		this.lbc["logger"]["info"]("Photon client reset.");
+		var camera = this.GetCamera(CameraName);
+		if (camera != null)
+		{
+			camera.isShaking = true;
+			camera.shakeStrength = Strength / 100;
+			camera.shakeMaxDeviation = MaxDeviation;
+			camera.shakeMaxZoomDeviation = MaxZoomDeviation;
+			camera.shakeBuildTime = BuildLength;
+			camera.shakeDropTime = DropTime;
+			camera.shakeLength = Duration;
+			camera.shakeTimer = 0;
+		}
 	};
 	pluginProto.acts = new Acts();
-	function Exps() {}
-	Exps.prototype.ErrorCode = function (ret)
+	function Exps() {};
+	Exps.prototype.MovementTransitionProgress = function (ret, CameraName)
 	{
-		ret.set_int(this.errorCode || 0);
+		var camera = this.GetCamera(CameraName);
+		if (null != camera)
+		{
+			for (var i = 0; i < camera.transitions.length; i++)
+			{
+				if (camera.transitions[i].type == "MOVE")
+				{
+					ret.set_float(camera.transitions[i].progress);
+					return;
+				}
+			}
+		}
+		ret.set_float(0);
 	};
-	Exps.prototype.ErrorMessage = function (ret)
+	Exps.prototype.ZoomTransitionProgress = function (ret, CameraName)
 	{
-		ret.set_string(this.errorMsg || "");
+		var camera = this.GetCamera(CameraName);
+		if (null != camera)
+		{
+			for (var i = 0; i < camera.transitions.length; i++)
+			{
+				if (camera.transitions[i].type == "SCALE")
+				{
+					ret.set_float(camera.transitions[i].progress);
+					return;
+				}
+			}
+		}
+		ret.set_float(0);
 	};
-	Exps.prototype.State = function (ret)
+	Exps.prototype.GetX = function (ret, CameraName)
 	{
-		ret.set_int(this.lbc["state"]);
+		var camera = this.GetCamera(CameraName);
+		if (null != camera)
+		{
+			ret.set_float(camera.x);
+			return;
+		}
+		ret.set_float(0);
 	};
-	Exps.prototype.StateString = function (ret)
+	Exps.prototype.GetY = function (ret, CameraName)
 	{
-		ret.set_string(Photon["LoadBalancing"]["LoadBalancingClient"]["StateToName"](this.lbc["state"]));
+		var camera = this.GetCamera(CameraName);
+		if (null != camera)
+		{
+			ret.set_float(camera.y);
+			return;
+		}
+		ret.set_float(0);
 	};
-	Exps.prototype.UserId = function (ret)
+	Exps.prototype.GetZoom = function (ret, CameraName)
 	{
-		ret.set_string(this.lbc["getUserId"]() || "");
+		var camera = this.GetCamera(CameraName);
+		if (null != camera)
+		{
+			ret.set_float(camera.scale);
+			return;
+		}
+		ret.set_float(0);
 	};
-	Exps.prototype.MyActorNr = function (ret)
+	Exps.prototype.GetActiveCamera = function (ret)
 	{
-		ret.set_int(this.lbc["myActor"]()["actorNr"]);
-	};
-	Exps.prototype.ActorNr = function (ret)
-	{
-		ret.set_int(this.actorNr || 0);
-	};
-	Exps.prototype.MyRoomName = function (ret)
-	{
-		ret.set_string(this.lbc["myRoom"]()["name"] || "");
-	};
-	Exps.prototype.EventCode = function (ret)
-	{
-		ret.set_int(this.eventCode || 0);
-	};
-	Exps.prototype.EventData = function (ret)
-	{
-		ret.set_any(this.eventData);
-	};
-	Exps.prototype.ActorNr = function (ret)
-	{
-		ret.set_int(this.actorNr || 0);
-	};
-	Exps.prototype.RoomCount = function (ret)
-	{
-		ret.set_int(this.lbc["availableRooms"]().length);
-	};
-	Exps.prototype.RoomNameAt = function (ret, i)
-	{
-		ret.set_string(this.lbc["availableRooms"]()[i]["name"] || "");
-	};
-	Exps.prototype.RoomMaxPlayers = function (ret, name)
-	{
-		var r = this.lbc["roomInfosDict"][name];
-		ret.set_int(r && r["maxPlayers"] || 0);
-	};
-	Exps.prototype.RoomIsOpen = function (ret, name)
-	{
-		var r = this.lbc["roomInfosDict"][name];
-		ret.set_int(r && r["isOpen"] ? 1 : 0);
-	};
-	Exps.prototype.RoomPlayerCount = function (ret, name)
-	{
-		var r = this.lbc["roomInfosDict"][name];
-		ret.set_int(r && r["playerCount"]);
-	};
-	Exps.prototype.RoomProperty = function (ret, name, propName)
-	{
-		var r = this.lbc["roomInfosDict"][name];
-		ret.set_any(r && r["getCustomProperty"](propName));
-	};
-	Exps.prototype.PropertyOfMyRoom = function (ret, propName)
-	{
-		var r = this.lbc["myRoom"]();
-		ret.set_any(r && r["getCustomProperty"](propName));
-	};
-	Exps.prototype.ActorCount = function (ret)
-	{
-		ret.set_int(this.lbc["myRoomActorsArray"]().length);
-	};
-	Exps.prototype.ActorNrAt = function (ret, i)
-	{
-		var a = this.lbc["myRoomActorsArray"]()[i];
-		ret.set_int(a && a["actorNr"] || -i);
-	};
-	Exps.prototype.ActorNameByNr = function (ret, nr)
-	{
-		var a = this.lbc["myRoomActors"]()[nr];
-		ret.set_string(a && a["name"] || "-- not found acorNr " + nr);
-	};
-	Exps.prototype.PropertyOfActorByNr = function (ret, nr, propName)
-	{
-		var a = this.lbc["myRoomActors"]()[nr];
-		ret.set_any(a && a["getCustomProperty"](propName));
-	};
-	Exps.prototype.ChangedPropertiesCount = function (ret)
-	{
-		ret.set_int(this.changedPropertiesNames && this.changedPropertiesNames.length || 0);
-	};
-	Exps.prototype.ChangedPropertyNameAt = function (ret, i)
-	{
-		ret.set_any(this.changedPropertiesNames && this.changedPropertiesNames[i]);
-	};
-	Exps.prototype.MasterActorNr = function (ret, i)
-	{
-		ret.set_int(this.lbc["myRoomMasterActorNr"]());
-	};
-	Exps.prototype.WebRpcUriPath = function (ret)
-	{
-		ret.set_string(this.webRpcUriPath || "");
-	};
-	Exps.prototype.WebRpcResultCode = function (ret)
-	{
-		ret.set_int(this.webRpcResultCode || 0);
-	};
-	Exps.prototype.WebRpcData = function (ret)
-	{
-		ret.set_any(this.webRpcData);
-	};
-	Exps.prototype.FriendOnline = function (ret, name)
-	{
-		ret.set_int(this.friends && this.friends[name] && this.friends[name]["online"] ? 1 : 0);
-	};
-	Exps.prototype.FriendRoom = function (ret, name)
-	{
-		ret.set_string(this.friends && this.friends[name] ? this.friends[name]["roomId"] : "");
-	};
-	Exps.prototype.LobbyStatsCount = function (ret)
-	{
-		ret.set_int(this.lobbyStats ? this.lobbyStats.length : 0);
-	};
-	Exps.prototype.LobbyStatsNameAt = function (ret, i)
-	{
-		ret.set_string(this.lobbyStats && this.lobbyStats[i] ? this.lobbyStats[i]["lobbyName"] : "");
-	};
-	Exps.prototype.LobbyStatsTypeAt = function (ret, i)
-	{
-		ret.set_int(this.lobbyStats && this.lobbyStats[i] ? this.lobbyStats[i]["lobbyType"] : 0);
-	};
-	Exps.prototype.LobbyStatsPeerCountAt = function (ret, i)
-	{
-		ret.set_int(this.lobbyStats && this.lobbyStats[i] ? this.lobbyStats[i]["peerCount"] : 0);
-	};
-	Exps.prototype.LobbyStatsGameCountAt = function (ret, i)
-	{
-		ret.set_int(this.lobbyStats && this.lobbyStats[i] ? this.lobbyStats[i]["gameCount"] : 0);
-	};
-	Exps.prototype.AppStatsPeerCount = function (ret, i)
-	{
-		ret.set_int(this.appStats ? this.appStats["peerCount"] : 0);
-	};
-	Exps.prototype.AppStatsMasterPeerCount = function (ret, i)
-	{
-		ret.set_int(this.appStats ? this.appStats["masterPeerCount"] : 0);
-	};
-	Exps.prototype.AppStatsGameCount = function (ret, i)
-	{
-		ret.set_int(this.appStats ? this.appStats["gameCount"] : 0);
+		if (null != this.activeCamera)
+		{
+			ret.set_string(this.activeCamera.name);
+			return;
+		}
+		ret.set_string("null");
 	};
 	pluginProto.exps = new Exps();
 }());
@@ -21308,1927 +17400,6 @@ cr.plugins_.Sprite = function(runtime)
 	Exps.prototype.ImageHeight = function (ret)
 	{
 		ret.set_float(this.curFrame.height);
-	};
-	pluginProto.exps = new Exps();
-}());
-/* global cr,log,assert2 */
-/* jshint globalstrict: true */
-/* jshint strict: true */
-;
-;
-cr.plugins_.Spritefont2 = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.Spritefont2.prototype;
-	pluginProto.onCreate = function ()
-	{
-	};
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-		if (this.is_family)
-			return;
-		this.texture_img = new Image();
-		this.runtime.waitForImageLoad(this.texture_img, this.texture_file);
-		this.webGL_texture = null;
-	};
-	typeProto.onLostWebGLContext = function ()
-	{
-		if (this.is_family)
-			return;
-		this.webGL_texture = null;
-	};
-	typeProto.onRestoreWebGLContext = function ()
-	{
-		if (this.is_family || !this.instances.length)
-			return;
-		if (!this.webGL_texture)
-		{
-			this.webGL_texture = this.runtime.glwrap.loadTexture(this.texture_img, false, this.runtime.linearSampling, this.texture_pixelformat);
-		}
-		var i, len;
-		for (i = 0, len = this.instances.length; i < len; i++)
-			this.instances[i].webGL_texture = this.webGL_texture;
-	};
-	typeProto.unloadTextures = function ()
-	{
-		if (this.is_family || this.instances.length || !this.webGL_texture)
-			return;
-		this.runtime.glwrap.deleteTexture(this.webGL_texture);
-		this.webGL_texture = null;
-	};
-	typeProto.preloadCanvas2D = function (ctx)
-	{
-		ctx.drawImage(this.texture_img, 0, 0);
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onDestroy = function()
-	{
-		freeAllLines (this.lines);
-		freeAllClip  (this.clipList);
-		freeAllClipUV(this.clipUV);
-		cr.wipe(this.characterWidthList);
-	};
-	instanceProto.onCreate = function()
-	{
-		this.texture_img      = this.type.texture_img;
-		this.characterWidth   = this.properties[0];
-		this.characterHeight  = this.properties[1];
-		this.characterSet     = this.properties[2];
-		this.text             = this.properties[3];
-		this.characterScale   = this.properties[4];
-		this.visible          = (this.properties[5] === 0);	// 0=visible, 1=invisible
-		this.halign           = this.properties[6]/2.0;		// 0=left, 1=center, 2=right
-		this.valign           = this.properties[7]/2.0;		// 0=top, 1=center, 2=bottom
-		this.wrapbyword       = (this.properties[9] === 0);	// 0=word, 1=character
-		this.characterSpacing = this.properties[10];
-		this.lineHeight       = this.properties[11];
-		this.textWidth  = 0;
-		this.textHeight = 0;
-		if (this.recycled)
-		{
-			cr.clearArray(this.lines);
-			cr.wipe(this.clipList);
-			cr.wipe(this.clipUV);
-			cr.wipe(this.characterWidthList);
-		}
-		else
-		{
-			this.lines = [];
-			this.clipList = {};
-			this.clipUV = {};
-			this.characterWidthList = {};
-		}
-		this.text_changed = true;
-		this.lastwrapwidth = this.width;
-		if (this.runtime.glwrap)
-		{
-			if (!this.type.webGL_texture)
-			{
-				this.type.webGL_texture = this.runtime.glwrap.loadTexture(this.type.texture_img, false, this.runtime.linearSampling, this.type.texture_pixelformat);
-			}
-			this.webGL_texture = this.type.webGL_texture;
-		}
-		this.SplitSheet();
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		var save = {
-			"t": this.text,
-			"csc": this.characterScale,
-			"csp": this.characterSpacing,
-			"lh": this.lineHeight,
-			"tw": this.textWidth,
-			"th": this.textHeight,
-			"lrt": this.last_render_tick,
-			"ha": this.halign,
-			"va": this.valign,
-			"cw": {}
-		};
-		for (var ch in this.characterWidthList)
-			save["cw"][ch] = this.characterWidthList[ch];
-		return save;
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.text = o["t"];
-		this.characterScale = o["csc"];
-		this.characterSpacing = o["csp"];
-		this.lineHeight = o["lh"];
-		this.textWidth = o["tw"];
-		this.textHeight = o["th"];
-		this.last_render_tick = o["lrt"];
-		if (o.hasOwnProperty("ha"))
-			this.halign = o["ha"];
-		if (o.hasOwnProperty("va"))
-			this.valign = o["va"];
-		for(var ch in o["cw"])
-			this.characterWidthList[ch] = o["cw"][ch];
-		this.text_changed = true;
-		this.lastwrapwidth = this.width;
-	};
-	function trimRight(text)
-	{
-		return text.replace(/\s\s*$/, '');
-	}
-	var MAX_CACHE_SIZE = 1000;
-	function alloc(cache,Constructor)
-	{
-		if (cache.length)
-			return cache.pop();
-		else
-			return new Constructor();
-	}
-	function free(cache,data)
-	{
-		if (cache.length < MAX_CACHE_SIZE)
-		{
-			cache.push(data);
-		}
-	}
-	function freeAll(cache,dataList,isArray)
-	{
-		if (isArray) {
-			var i, len;
-			for (i = 0, len = dataList.length; i < len; i++)
-			{
-				free(cache,dataList[i]);
-			}
-			cr.clearArray(dataList);
-		} else {
-			var prop;
-			for(prop in dataList) {
-				if(Object.prototype.hasOwnProperty.call(dataList,prop)) {
-					free(cache,dataList[prop]);
-					delete dataList[prop];
-				}
-			}
-		}
-	}
-	function addLine(inst,lineIndex,cur_line) {
-		var lines = inst.lines;
-		var line;
-		cur_line = trimRight(cur_line);
-		if (lineIndex >= lines.length)
-			lines.push(allocLine());
-		line = lines[lineIndex];
-		line.text = cur_line;
-		line.width = inst.measureWidth(cur_line);
-		inst.textWidth = cr.max(inst.textWidth,line.width);
-	}
-	var linesCache = [];
-	function allocLine()       { return alloc(linesCache,Object); }
-	function freeLine(l)       { free(linesCache,l); }
-	function freeAllLines(arr) { freeAll(linesCache,arr,true); }
-	function addClip(obj,property,x,y,w,h) {
-		if (obj[property] === undefined) {
-			obj[property] = alloc(clipCache,Object);
-		}
-		obj[property].x = x;
-		obj[property].y = y;
-		obj[property].w = w;
-		obj[property].h = h;
-	}
-	var clipCache = [];
-	function allocClip()      { return alloc(clipCache,Object); }
-	function freeAllClip(obj) { freeAll(clipCache,obj,false);}
-	function addClipUV(obj,property,left,top,right,bottom) {
-		if (obj[property] === undefined) {
-			obj[property] = alloc(clipUVCache,cr.rect);
-		}
-		obj[property].left   = left;
-		obj[property].top    = top;
-		obj[property].right  = right;
-		obj[property].bottom = bottom;
-	}
-	var clipUVCache = [];
-	function allocClipUV()      { return alloc(clipUVCache,cr.rect);}
-	function freeAllClipUV(obj) { freeAll(clipUVCache,obj,false);}
-	instanceProto.SplitSheet = function() {
-		var texture      = this.texture_img;
-		var texWidth     = texture.width;
-		var texHeight    = texture.height;
-		var charWidth    = this.characterWidth;
-		var charHeight   = this.characterHeight;
-		var charU        = charWidth /texWidth;
-		var charV        = charHeight/texHeight;
-		var charSet      = this.characterSet ;
-		var cols = Math.floor(texWidth/charWidth);
-		var rows = Math.floor(texHeight/charHeight);
-		for ( var c = 0; c < charSet.length; c++) {
-			if  (c >= cols * rows) break;
-			var x = c%cols;
-			var y = Math.floor(c/cols);
-			var letter = charSet.charAt(c);
-			if (this.runtime.glwrap) {
-				addClipUV(
-					this.clipUV, letter,
-					x * charU ,
-					y * charV ,
-					(x+1) * charU ,
-					(y+1) * charV
-				);
-			} else {
-				addClip(
-					this.clipList, letter,
-					x * charWidth,
-					y * charHeight,
-					charWidth,
-					charHeight
-				);
-			}
-		}
-	};
-	/*
-     *	Word-Wrapping
-     */
-	var wordsCache = [];
-	pluginProto.TokeniseWords = function (text)
-	{
-		cr.clearArray(wordsCache);
-		var cur_word = "";
-		var ch;
-		var i = 0;
-		while (i < text.length)
-		{
-			ch = text.charAt(i);
-			if (ch === "\n")
-			{
-				if (cur_word.length)
-				{
-					wordsCache.push(cur_word);
-					cur_word = "";
-				}
-				wordsCache.push("\n");
-				++i;
-			}
-			else if (ch === " " || ch === "\t" || ch === "-")
-			{
-				do {
-					cur_word += text.charAt(i);
-					i++;
-				}
-				while (i < text.length && (text.charAt(i) === " " || text.charAt(i) === "\t"));
-				wordsCache.push(cur_word);
-				cur_word = "";
-			}
-			else if (i < text.length)
-			{
-				cur_word += ch;
-				i++;
-			}
-		}
-		if (cur_word.length)
-			wordsCache.push(cur_word);
-	};
-	pluginProto.WordWrap = function (inst)
-	{
-		var text = inst.text;
-		var lines = inst.lines;
-		if (!text || !text.length)
-		{
-			freeAllLines(lines);
-			return;
-		}
-		var width = inst.width;
-		if (width <= 2.0)
-		{
-			freeAllLines(lines);
-			return;
-		}
-		var charWidth = inst.characterWidth;
-		var charScale = inst.characterScale;
-		var charSpacing = inst.characterSpacing;
-		if ( (text.length * (charWidth * charScale + charSpacing) - charSpacing) <= width && text.indexOf("\n") === -1)
-		{
-			var all_width = inst.measureWidth(text);
-			if (all_width <= width)
-			{
-				freeAllLines(lines);
-				lines.push(allocLine());
-				lines[0].text = text;
-				lines[0].width = all_width;
-				inst.textWidth  = all_width;
-				inst.textHeight = inst.characterHeight * charScale + inst.lineHeight;
-				return;
-			}
-		}
-		var wrapbyword = inst.wrapbyword;
-		this.WrapText(inst);
-		inst.textHeight = lines.length * (inst.characterHeight * charScale + inst.lineHeight);
-	};
-	pluginProto.WrapText = function (inst)
-	{
-		var wrapbyword = inst.wrapbyword;
-		var text       = inst.text;
-		var lines      = inst.lines;
-		var width      = inst.width;
-		var wordArray;
-		if (wrapbyword) {
-			this.TokeniseWords(text);	// writes to wordsCache
-			wordArray = wordsCache;
-		} else {
-			wordArray = text;
-		}
-		var cur_line = "";
-		var prev_line;
-		var line_width;
-		var i;
-		var lineIndex = 0;
-		var line;
-		var ignore_newline = false;
-		for (i = 0; i < wordArray.length; i++)
-		{
-			if (wordArray[i] === "\n")
-			{
-				if (ignore_newline === true) {
-					ignore_newline = false;
-				} else {
-					addLine(inst,lineIndex,cur_line);
-					lineIndex++;
-				}
-				cur_line = "";
-				continue;
-			}
-			ignore_newline = false;
-			prev_line = cur_line;
-			cur_line += wordArray[i];
-			line_width = inst.measureWidth(trimRight(cur_line));
-			if (line_width > width)
-			{
-				if (prev_line === "") {
-					addLine(inst,lineIndex,cur_line);
-					cur_line = "";
-					ignore_newline = true;
-				} else {
-					addLine(inst,lineIndex,prev_line);
-					cur_line = wordArray[i];
-				}
-				lineIndex++;
-				if (!wrapbyword && cur_line === " ")
-					cur_line = "";
-			}
-		}
-		if (trimRight(cur_line).length)
-		{
-			addLine(inst,lineIndex,cur_line);
-			lineIndex++;
-		}
-		for (i = lineIndex; i < lines.length; i++)
-			freeLine(lines[i]);
-		lines.length = lineIndex;
-	};
-	instanceProto.measureWidth = function(text) {
-		var spacing = this.characterSpacing;
-		var len     = text.length;
-		var width   = 0;
-		for (var i = 0; i < len; i++) {
-			width += this.getCharacterWidth(text.charAt(i)) * this.characterScale + spacing;
-		}
-		width -= (width > 0) ? spacing : 0;
-		return width;
-	};
-	/***/
-	instanceProto.getCharacterWidth = function(character) {
-		var widthList = this.characterWidthList;
-		if (widthList[character] !== undefined) {
-			return widthList[character];
-		} else {
-			return this.characterWidth;
-		}
-	};
-	instanceProto.rebuildText = function() {
-		if (this.text_changed || this.width !== this.lastwrapwidth) {
-			this.textWidth = 0;
-			this.textHeight = 0;
-			this.type.plugin.WordWrap(this);
-			this.text_changed = false;
-			this.lastwrapwidth = this.width;
-		}
-	};
-	var EPSILON = 0.00001;
-	instanceProto.draw = function(ctx, glmode)
-	{
-		var texture = this.texture_img;
-		if (this.text !== "" && texture != null) {
-			this.rebuildText();
-			if (this.height < this.characterHeight*this.characterScale + this.lineHeight) {
-				return;
-			}
-			ctx.globalAlpha = this.opacity;
-			var myx = this.x;
-			var myy = this.y;
-			if (this.runtime.pixel_rounding)
-			{
-				myx = Math.round(myx);
-				myy = Math.round(myy);
-			}
-			var viewLeft = this.layer.viewLeft;
-			var viewTop = this.layer.viewTop;
-			var viewRight = this.layer.viewRight;
-			var viewBottom = this.layer.viewBottom;
-			ctx.save();
-			ctx.translate(myx, myy);
-			ctx.rotate(this.angle);
-			var angle      = this.angle;
-			var ha         = this.halign;
-			var va         = this.valign;
-			var scale      = this.characterScale;
-			var charHeight = this.characterHeight * scale;
-			var lineHeight = this.lineHeight;
-			var charSpace  = this.characterSpacing;
-			var lines = this.lines;
-			var textHeight = this.textHeight;
-			var letterWidth;
-			var halign;
-			var valign = va * cr.max(0,(this.height - textHeight));
-			var offx = -(this.hotspotX * this.width);
-			var offy = -(this.hotspotY * this.height);
-			offy += valign;
-			var drawX ;
-			var drawY = offy;
-			var roundX, roundY;
-			for(var i = 0; i < lines.length; i++) {
-				var line = lines[i].text;
-				var len  = lines[i].width;
-				halign = ha * cr.max(0,this.width - len);
-				drawX = offx + halign;
-				drawY += lineHeight;
-				if (angle === 0 && myy + drawY + charHeight < viewTop)
-				{
-					drawY += charHeight;
-					continue;
-				}
-				for(var j = 0; j < line.length; j++) {
-					var letter = line.charAt(j);
-					letterWidth = this.getCharacterWidth(letter);
-					var clip = this.clipList[letter];
-					if (angle === 0 && myx + drawX + letterWidth * scale + charSpace < viewLeft)
-					{
-						drawX += letterWidth * scale + charSpace;
-						continue;
-					}
-					if ( drawX + letterWidth * scale > this.width + EPSILON ) {
-						break;
-					}
-					if (clip !== undefined) {
-						roundX = drawX;
-						roundY = drawY;
-						if (angle === 0)
-						{
-							roundX = Math.round(roundX);
-							roundY = Math.round(roundY);
-						}
-						ctx.drawImage( this.texture_img,
-									 clip.x, clip.y, clip.w, clip.h,
-									 roundX,roundY,clip.w*scale,clip.h*scale);
-					}
-					drawX += letterWidth * scale + charSpace;
-					if (angle === 0 && myx + drawX > viewRight)
-						break;
-				}
-				drawY += charHeight;
-				if (angle === 0 && (drawY + charHeight + lineHeight > this.height || myy + drawY > viewBottom))
-				{
-					break;
-				}
-			}
-			ctx.restore();
-		}
-	};
-	var dQuad = new cr.quad();
-	function rotateQuad(quad,cosa,sina) {
-		var x_temp;
-		x_temp   = (quad.tlx * cosa) - (quad.tly * sina);
-		quad.tly = (quad.tly * cosa) + (quad.tlx * sina);
-		quad.tlx = x_temp;
-		x_temp    = (quad.trx * cosa) - (quad.try_ * sina);
-		quad.try_ = (quad.try_ * cosa) + (quad.trx * sina);
-		quad.trx  = x_temp;
-		x_temp   = (quad.blx * cosa) - (quad.bly * sina);
-		quad.bly = (quad.bly * cosa) + (quad.blx * sina);
-		quad.blx = x_temp;
-		x_temp    = (quad.brx * cosa) - (quad.bry * sina);
-		quad.bry = (quad.bry * cosa) + (quad.brx * sina);
-		quad.brx  = x_temp;
-	}
-	instanceProto.drawGL = function(glw)
-	{
-		glw.setTexture(this.webGL_texture);
-		glw.setOpacity(this.opacity);
-		if (!this.text)
-			return;
-		this.rebuildText();
-		if (this.height < this.characterHeight*this.characterScale + this.lineHeight) {
-			return;
-		}
-		this.update_bbox();
-		var q = this.bquad;
-		var ox = 0;
-		var oy = 0;
-		if (this.runtime.pixel_rounding)
-		{
-			ox = Math.round(this.x) - this.x;
-			oy = Math.round(this.y) - this.y;
-		}
-		var viewLeft = this.layer.viewLeft;
-		var viewTop = this.layer.viewTop;
-		var viewRight = this.layer.viewRight;
-		var viewBottom = this.layer.viewBottom;
-		var angle      = this.angle;
-		var ha         = this.halign;
-		var va         = this.valign;
-		var scale      = this.characterScale;
-		var charHeight = this.characterHeight * scale;   // to precalculate in onCreate or on change
-		var lineHeight = this.lineHeight;
-		var charSpace  = this.characterSpacing;
-		var lines = this.lines;
-		var textHeight = this.textHeight;
-		var letterWidth;
-		var cosa,sina;
-		if (angle !== 0)
-		{
-			cosa = Math.cos(angle);
-			sina = Math.sin(angle);
-		}
-		var halign;
-		var valign = va * cr.max(0,(this.height - textHeight));
-		var offx = q.tlx + ox;
-		var offy = q.tly + oy;
-		var drawX ;
-		var drawY = valign;
-		var roundX, roundY;
-		for(var i = 0; i < lines.length; i++) {
-			var line       = lines[i].text;
-			var lineWidth  = lines[i].width;
-			halign = ha * cr.max(0,this.width - lineWidth);
-			drawX = halign;
-			drawY += lineHeight;
-			if (angle === 0 && offy + drawY + charHeight < viewTop)
-			{
-				drawY += charHeight;
-				continue;
-			}
-			for(var j = 0; j < line.length; j++) {
-				var letter = line.charAt(j);
-				letterWidth = this.getCharacterWidth(letter);
-				var clipUV = this.clipUV[letter];
-				if (angle === 0 && offx + drawX + letterWidth * scale + charSpace < viewLeft)
-				{
-					drawX += letterWidth * scale + charSpace;
-					continue;
-				}
-				if (drawX + letterWidth * scale > this.width + EPSILON)
-				{
-					break;
-				}
-				if (clipUV !== undefined) {
-					var clipWidth  = this.characterWidth*scale;
-					var clipHeight = this.characterHeight*scale;
-					roundX = drawX;
-					roundY = drawY;
-					if (angle === 0)
-					{
-						roundX = Math.round(roundX);
-						roundY = Math.round(roundY);
-					}
-					dQuad.tlx  = roundX;
-					dQuad.tly  = roundY;
-					dQuad.trx  = roundX + clipWidth;
-					dQuad.try_ = roundY ;
-					dQuad.blx  = roundX;
-					dQuad.bly  = roundY + clipHeight;
-					dQuad.brx  = roundX + clipWidth;
-					dQuad.bry  = roundY + clipHeight;
-					if(angle !== 0)
-					{
-						rotateQuad(dQuad,cosa,sina);
-					}
-					dQuad.offset(offx,offy);
-					glw.quadTex(
-						dQuad.tlx, dQuad.tly,
-						dQuad.trx, dQuad.try_,
-						dQuad.brx, dQuad.bry,
-						dQuad.blx, dQuad.bly,
-						clipUV
-					);
-				}
-				drawX += letterWidth * scale + charSpace;
-				if (angle === 0 && offx + drawX > viewRight)
-					break;
-			}
-			drawY += charHeight;
-			if (angle === 0 && (drawY + charHeight + lineHeight > this.height || offy + drawY > viewBottom))
-			{
-				break;
-			}
-		}
-	};
-	function Cnds() {}
-	Cnds.prototype.CompareText = function(text_to_compare, case_sensitive)
-	{
-		if (case_sensitive)
-			return this.text == text_to_compare;
-		else
-			return cr.equals_nocase(this.text, text_to_compare);
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {}
-	Acts.prototype.SetText = function(param)
-	{
-		if (cr.is_number(param) && param < 1e9)
-			param = Math.round(param * 1e10) / 1e10;	// round to nearest ten billionth - hides floating point errors
-		var text_to_set = param.toString();
-		if (this.text !== text_to_set)
-		{
-			this.text = text_to_set;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.AppendText = function(param)
-	{
-		if (cr.is_number(param))
-			param = Math.round(param * 1e10) / 1e10;	// round to nearest ten billionth - hides floating point errors
-		var text_to_append = param.toString();
-		if (text_to_append)	// not empty
-		{
-			this.text += text_to_append;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.SetScale = function(param)
-	{
-		if (param !== this.characterScale) {
-			this.characterScale = param;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.SetCharacterSpacing = function(param)
-	{
-		if (param !== this.CharacterSpacing) {
-			this.characterSpacing = param;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.SetLineHeight = function(param)
-	{
-		if (param !== this.lineHeight) {
-			this.lineHeight = param;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	instanceProto.SetCharWidth = function(character,width) {
-		var w = parseInt(width,10);
-		if (this.characterWidthList[character] !== w) {
-			this.characterWidthList[character] = w;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.SetCharacterWidth = function(characterSet,width)
-	{
-		if (characterSet !== "") {
-			for(var c = 0; c < characterSet.length; c++) {
-				this.SetCharWidth(characterSet.charAt(c),width);
-			}
-		}
-	};
-	Acts.prototype.SetEffect = function (effect)
-	{
-		this.blend_mode = effect;
-		this.compositeOp = cr.effectToCompositeOp(effect);
-		cr.setGLBlend(this, effect, this.runtime.gl);
-		this.runtime.redraw = true;
-	};
-	Acts.prototype.SetHAlign = function (a)
-	{
-		this.halign = a / 2.0;
-		this.text_changed = true;
-		this.runtime.redraw = true;
-	};
-	Acts.prototype.SetVAlign = function (a)
-	{
-		this.valign = a / 2.0;
-		this.text_changed = true;
-		this.runtime.redraw = true;
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {}
-	Exps.prototype.CharacterWidth = function(ret,character)
-	{
-		ret.set_int(this.getCharacterWidth(character));
-	};
-	Exps.prototype.CharacterHeight = function(ret)
-	{
-		ret.set_int(this.characterHeight);
-	};
-	Exps.prototype.CharacterScale = function(ret)
-	{
-		ret.set_float(this.characterScale);
-	};
-	Exps.prototype.CharacterSpacing = function(ret)
-	{
-		ret.set_int(this.characterSpacing);
-	};
-	Exps.prototype.LineHeight = function(ret)
-	{
-		ret.set_int(this.lineHeight);
-	};
-	Exps.prototype.Text = function(ret)
-	{
-		ret.set_string(this.text);
-	};
-	Exps.prototype.TextWidth = function (ret)
-	{
-		this.rebuildText();
-		ret.set_float(this.textWidth);
-	};
-	Exps.prototype.TextHeight = function (ret)
-	{
-		this.rebuildText();
-		ret.set_float(this.textHeight);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.Text = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.Text.prototype;
-	pluginProto.onCreate = function ()
-	{
-		pluginProto.acts.SetWidth = function (w)
-		{
-			if (this.width !== w)
-			{
-				this.width = w;
-				this.text_changed = true;	// also recalculate text wrapping
-				this.set_bbox_changed();
-			}
-		};
-	};
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	typeProto.onLostWebGLContext = function ()
-	{
-		if (this.is_family)
-			return;
-		var i, len, inst;
-		for (i = 0, len = this.instances.length; i < len; i++)
-		{
-			inst = this.instances[i];
-			inst.mycanvas = null;
-			inst.myctx = null;
-			inst.mytex = null;
-		}
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-		if (this.recycled)
-			cr.clearArray(this.lines);
-		else
-			this.lines = [];		// for word wrapping
-		this.text_changed = true;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	var requestedWebFonts = {};		// already requested web fonts have an entry here
-	instanceProto.onCreate = function()
-	{
-		this.text = this.properties[0];
-		this.visible = (this.properties[1] === 0);		// 0=visible, 1=invisible
-		this.font = this.properties[2];
-		this.color = this.properties[3];
-		this.halign = this.properties[4];				// 0=left, 1=center, 2=right
-		this.valign = this.properties[5];				// 0=top, 1=center, 2=bottom
-		this.wrapbyword = (this.properties[7] === 0);	// 0=word, 1=character
-		this.lastwidth = this.width;
-		this.lastwrapwidth = this.width;
-		this.lastheight = this.height;
-		this.line_height_offset = this.properties[8];
-		this.facename = "";
-		this.fontstyle = "";
-		this.ptSize = 0;
-		this.textWidth = 0;
-		this.textHeight = 0;
-		this.parseFont();
-		this.mycanvas = null;
-		this.myctx = null;
-		this.mytex = null;
-		this.need_text_redraw = false;
-		this.last_render_tick = this.runtime.tickcount;
-		if (this.recycled)
-			this.rcTex.set(0, 0, 1, 1);
-		else
-			this.rcTex = new cr.rect(0, 0, 1, 1);
-		if (this.runtime.glwrap)
-			this.runtime.tickMe(this);
-;
-	};
-	instanceProto.parseFont = function ()
-	{
-		var arr = this.font.split(" ");
-		var i;
-		for (i = 0; i < arr.length; i++)
-		{
-			if (arr[i].substr(arr[i].length - 2, 2) === "pt")
-			{
-				this.ptSize = parseInt(arr[i].substr(0, arr[i].length - 2));
-				this.pxHeight = Math.ceil((this.ptSize / 72.0) * 96.0) + 4;	// assume 96dpi...
-				if (i > 0)
-					this.fontstyle = arr[i - 1];
-				this.facename = arr[i + 1];
-				for (i = i + 2; i < arr.length; i++)
-					this.facename += " " + arr[i];
-				break;
-			}
-		}
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		return {
-			"t": this.text,
-			"f": this.font,
-			"c": this.color,
-			"ha": this.halign,
-			"va": this.valign,
-			"wr": this.wrapbyword,
-			"lho": this.line_height_offset,
-			"fn": this.facename,
-			"fs": this.fontstyle,
-			"ps": this.ptSize,
-			"pxh": this.pxHeight,
-			"tw": this.textWidth,
-			"th": this.textHeight,
-			"lrt": this.last_render_tick
-		};
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.text = o["t"];
-		this.font = o["f"];
-		this.color = o["c"];
-		this.halign = o["ha"];
-		this.valign = o["va"];
-		this.wrapbyword = o["wr"];
-		this.line_height_offset = o["lho"];
-		this.facename = o["fn"];
-		this.fontstyle = o["fs"];
-		this.ptSize = o["ps"];
-		this.pxHeight = o["pxh"];
-		this.textWidth = o["tw"];
-		this.textHeight = o["th"];
-		this.last_render_tick = o["lrt"];
-		this.text_changed = true;
-		this.lastwidth = this.width;
-		this.lastwrapwidth = this.width;
-		this.lastheight = this.height;
-	};
-	instanceProto.tick = function ()
-	{
-		if (this.runtime.glwrap && this.mytex && (this.runtime.tickcount - this.last_render_tick >= 300))
-		{
-			var layer = this.layer;
-            this.update_bbox();
-            var bbox = this.bbox;
-            if (bbox.right < layer.viewLeft || bbox.bottom < layer.viewTop || bbox.left > layer.viewRight || bbox.top > layer.viewBottom)
-			{
-				this.runtime.glwrap.deleteTexture(this.mytex);
-				this.mytex = null;
-				this.myctx = null;
-				this.mycanvas = null;
-			}
-		}
-	};
-	instanceProto.onDestroy = function ()
-	{
-		this.myctx = null;
-		this.mycanvas = null;
-		if (this.runtime.glwrap && this.mytex)
-			this.runtime.glwrap.deleteTexture(this.mytex);
-		this.mytex = null;
-	};
-	instanceProto.updateFont = function ()
-	{
-		this.font = this.fontstyle + " " + this.ptSize.toString() + "pt " + this.facename;
-		this.text_changed = true;
-		this.runtime.redraw = true;
-	};
-	instanceProto.draw = function(ctx, glmode)
-	{
-		ctx.font = this.font;
-		ctx.textBaseline = "top";
-		ctx.fillStyle = this.color;
-		ctx.globalAlpha = glmode ? 1 : this.opacity;
-		var myscale = 1;
-		if (glmode)
-		{
-			myscale = Math.abs(this.layer.getScale());
-			ctx.save();
-			ctx.scale(myscale, myscale);
-		}
-		if (this.text_changed || this.width !== this.lastwrapwidth)
-		{
-			this.type.plugin.WordWrap(this.text, this.lines, ctx, this.width, this.wrapbyword);
-			this.text_changed = false;
-			this.lastwrapwidth = this.width;
-		}
-		this.update_bbox();
-		var penX = glmode ? 0 : this.bquad.tlx;
-		var penY = glmode ? 0 : this.bquad.tly;
-		if (this.runtime.pixel_rounding)
-		{
-			penX = (penX + 0.5) | 0;
-			penY = (penY + 0.5) | 0;
-		}
-		if (this.angle !== 0 && !glmode)
-		{
-			ctx.save();
-			ctx.translate(penX, penY);
-			ctx.rotate(this.angle);
-			penX = 0;
-			penY = 0;
-		}
-		var endY = penY + this.height;
-		var line_height = this.pxHeight;
-		line_height += this.line_height_offset;
-		var drawX;
-		var i;
-		if (this.valign === 1)		// center
-			penY += Math.max(this.height / 2 - (this.lines.length * line_height) / 2, 0);
-		else if (this.valign === 2)	// bottom
-			penY += Math.max(this.height - (this.lines.length * line_height) - 2, 0);
-		for (i = 0; i < this.lines.length; i++)
-		{
-			drawX = penX;
-			if (this.halign === 1)		// center
-				drawX = penX + (this.width - this.lines[i].width) / 2;
-			else if (this.halign === 2)	// right
-				drawX = penX + (this.width - this.lines[i].width);
-			ctx.fillText(this.lines[i].text, drawX, penY);
-			penY += line_height;
-			if (penY >= endY - line_height)
-				break;
-		}
-		if (this.angle !== 0 || glmode)
-			ctx.restore();
-		this.last_render_tick = this.runtime.tickcount;
-	};
-	instanceProto.drawGL = function(glw)
-	{
-		if (this.width < 1 || this.height < 1)
-			return;
-		var need_redraw = this.text_changed || this.need_text_redraw;
-		this.need_text_redraw = false;
-		var layer_scale = this.layer.getScale();
-		var layer_angle = this.layer.getAngle();
-		var rcTex = this.rcTex;
-		var floatscaledwidth = layer_scale * this.width;
-		var floatscaledheight = layer_scale * this.height;
-		var scaledwidth = Math.ceil(floatscaledwidth);
-		var scaledheight = Math.ceil(floatscaledheight);
-		var absscaledwidth = Math.abs(scaledwidth);
-		var absscaledheight = Math.abs(scaledheight);
-		var halfw = this.runtime.draw_width / 2;
-		var halfh = this.runtime.draw_height / 2;
-		if (!this.myctx)
-		{
-			this.mycanvas = document.createElement("canvas");
-			this.mycanvas.width = absscaledwidth;
-			this.mycanvas.height = absscaledheight;
-			this.lastwidth = absscaledwidth;
-			this.lastheight = absscaledheight;
-			need_redraw = true;
-			this.myctx = this.mycanvas.getContext("2d");
-		}
-		if (absscaledwidth !== this.lastwidth || absscaledheight !== this.lastheight)
-		{
-			this.mycanvas.width = absscaledwidth;
-			this.mycanvas.height = absscaledheight;
-			if (this.mytex)
-			{
-				glw.deleteTexture(this.mytex);
-				this.mytex = null;
-			}
-			need_redraw = true;
-		}
-		if (need_redraw)
-		{
-			this.myctx.clearRect(0, 0, absscaledwidth, absscaledheight);
-			this.draw(this.myctx, true);
-			if (!this.mytex)
-				this.mytex = glw.createEmptyTexture(absscaledwidth, absscaledheight, this.runtime.linearSampling, this.runtime.isMobile);
-			glw.videoToTexture(this.mycanvas, this.mytex, this.runtime.isMobile);
-		}
-		this.lastwidth = absscaledwidth;
-		this.lastheight = absscaledheight;
-		glw.setTexture(this.mytex);
-		glw.setOpacity(this.opacity);
-		glw.resetModelView();
-		glw.translate(-halfw, -halfh);
-		glw.updateModelView();
-		var q = this.bquad;
-		var tlx = this.layer.layerToCanvas(q.tlx, q.tly, true, true);
-		var tly = this.layer.layerToCanvas(q.tlx, q.tly, false, true);
-		var trx = this.layer.layerToCanvas(q.trx, q.try_, true, true);
-		var try_ = this.layer.layerToCanvas(q.trx, q.try_, false, true);
-		var brx = this.layer.layerToCanvas(q.brx, q.bry, true, true);
-		var bry = this.layer.layerToCanvas(q.brx, q.bry, false, true);
-		var blx = this.layer.layerToCanvas(q.blx, q.bly, true, true);
-		var bly = this.layer.layerToCanvas(q.blx, q.bly, false, true);
-		if (this.runtime.pixel_rounding || (this.angle === 0 && layer_angle === 0))
-		{
-			var ox = ((tlx + 0.5) | 0) - tlx;
-			var oy = ((tly + 0.5) | 0) - tly
-			tlx += ox;
-			tly += oy;
-			trx += ox;
-			try_ += oy;
-			brx += ox;
-			bry += oy;
-			blx += ox;
-			bly += oy;
-		}
-		if (this.angle === 0 && layer_angle === 0)
-		{
-			trx = tlx + scaledwidth;
-			try_ = tly;
-			brx = trx;
-			bry = tly + scaledheight;
-			blx = tlx;
-			bly = bry;
-			rcTex.right = 1;
-			rcTex.bottom = 1;
-		}
-		else
-		{
-			rcTex.right = floatscaledwidth / scaledwidth;
-			rcTex.bottom = floatscaledheight / scaledheight;
-		}
-		glw.quadTex(tlx, tly, trx, try_, brx, bry, blx, bly, rcTex);
-		glw.resetModelView();
-		glw.scale(layer_scale, layer_scale);
-		glw.rotateZ(-this.layer.getAngle());
-		glw.translate((this.layer.viewLeft + this.layer.viewRight) / -2, (this.layer.viewTop + this.layer.viewBottom) / -2);
-		glw.updateModelView();
-		this.last_render_tick = this.runtime.tickcount;
-	};
-	var wordsCache = [];
-	pluginProto.TokeniseWords = function (text)
-	{
-		cr.clearArray(wordsCache);
-		var cur_word = "";
-		var ch;
-		var i = 0;
-		while (i < text.length)
-		{
-			ch = text.charAt(i);
-			if (ch === "\n")
-			{
-				if (cur_word.length)
-				{
-					wordsCache.push(cur_word);
-					cur_word = "";
-				}
-				wordsCache.push("\n");
-				++i;
-			}
-			else if (ch === " " || ch === "\t" || ch === "-")
-			{
-				do {
-					cur_word += text.charAt(i);
-					i++;
-				}
-				while (i < text.length && (text.charAt(i) === " " || text.charAt(i) === "\t"));
-				wordsCache.push(cur_word);
-				cur_word = "";
-			}
-			else if (i < text.length)
-			{
-				cur_word += ch;
-				i++;
-			}
-		}
-		if (cur_word.length)
-			wordsCache.push(cur_word);
-	};
-	var linesCache = [];
-	function allocLine()
-	{
-		if (linesCache.length)
-			return linesCache.pop();
-		else
-			return {};
-	};
-	function freeLine(l)
-	{
-		linesCache.push(l);
-	};
-	function freeAllLines(arr)
-	{
-		var i, len;
-		for (i = 0, len = arr.length; i < len; i++)
-		{
-			freeLine(arr[i]);
-		}
-		cr.clearArray(arr);
-	};
-	pluginProto.WordWrap = function (text, lines, ctx, width, wrapbyword)
-	{
-		if (!text || !text.length)
-		{
-			freeAllLines(lines);
-			return;
-		}
-		if (width <= 2.0)
-		{
-			freeAllLines(lines);
-			return;
-		}
-		if (text.length <= 100 && text.indexOf("\n") === -1)
-		{
-			var all_width = ctx.measureText(text).width;
-			if (all_width <= width)
-			{
-				freeAllLines(lines);
-				lines.push(allocLine());
-				lines[0].text = text;
-				lines[0].width = all_width;
-				return;
-			}
-		}
-		this.WrapText(text, lines, ctx, width, wrapbyword);
-	};
-	function trimSingleSpaceRight(str)
-	{
-		if (!str.length || str.charAt(str.length - 1) !== " ")
-			return str;
-		return str.substring(0, str.length - 1);
-	};
-	pluginProto.WrapText = function (text, lines, ctx, width, wrapbyword)
-	{
-		var wordArray;
-		if (wrapbyword)
-		{
-			this.TokeniseWords(text);	// writes to wordsCache
-			wordArray = wordsCache;
-		}
-		else
-			wordArray = text;
-		var cur_line = "";
-		var prev_line;
-		var line_width;
-		var i;
-		var lineIndex = 0;
-		var line;
-		for (i = 0; i < wordArray.length; i++)
-		{
-			if (wordArray[i] === "\n")
-			{
-				if (lineIndex >= lines.length)
-					lines.push(allocLine());
-				cur_line = trimSingleSpaceRight(cur_line);		// for correct center/right alignment
-				line = lines[lineIndex];
-				line.text = cur_line;
-				line.width = ctx.measureText(cur_line).width;
-				lineIndex++;
-				cur_line = "";
-				continue;
-			}
-			prev_line = cur_line;
-			cur_line += wordArray[i];
-			line_width = ctx.measureText(cur_line).width;
-			if (line_width >= width)
-			{
-				if (lineIndex >= lines.length)
-					lines.push(allocLine());
-				prev_line = trimSingleSpaceRight(prev_line);
-				line = lines[lineIndex];
-				line.text = prev_line;
-				line.width = ctx.measureText(prev_line).width;
-				lineIndex++;
-				cur_line = wordArray[i];
-				if (!wrapbyword && cur_line === " ")
-					cur_line = "";
-			}
-		}
-		if (cur_line.length)
-		{
-			if (lineIndex >= lines.length)
-				lines.push(allocLine());
-			cur_line = trimSingleSpaceRight(cur_line);
-			line = lines[lineIndex];
-			line.text = cur_line;
-			line.width = ctx.measureText(cur_line).width;
-			lineIndex++;
-		}
-		for (i = lineIndex; i < lines.length; i++)
-			freeLine(lines[i]);
-		lines.length = lineIndex;
-	};
-	function Cnds() {};
-	Cnds.prototype.CompareText = function(text_to_compare, case_sensitive)
-	{
-		if (case_sensitive)
-			return this.text == text_to_compare;
-		else
-			return cr.equals_nocase(this.text, text_to_compare);
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetText = function(param)
-	{
-		if (cr.is_number(param) && param < 1e9)
-			param = Math.round(param * 1e10) / 1e10;	// round to nearest ten billionth - hides floating point errors
-		var text_to_set = param.toString();
-		if (this.text !== text_to_set)
-		{
-			this.text = text_to_set;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.AppendText = function(param)
-	{
-		if (cr.is_number(param))
-			param = Math.round(param * 1e10) / 1e10;	// round to nearest ten billionth - hides floating point errors
-		var text_to_append = param.toString();
-		if (text_to_append)	// not empty
-		{
-			this.text += text_to_append;
-			this.text_changed = true;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.SetFontFace = function (face_, style_)
-	{
-		var newstyle = "";
-		switch (style_) {
-		case 1: newstyle = "bold"; break;
-		case 2: newstyle = "italic"; break;
-		case 3: newstyle = "bold italic"; break;
-		}
-		if (face_ === this.facename && newstyle === this.fontstyle)
-			return;		// no change
-		this.facename = face_;
-		this.fontstyle = newstyle;
-		this.updateFont();
-	};
-	Acts.prototype.SetFontSize = function (size_)
-	{
-		if (this.ptSize === size_)
-			return;
-		this.ptSize = size_;
-		this.pxHeight = Math.ceil((this.ptSize / 72.0) * 96.0) + 4;	// assume 96dpi...
-		this.updateFont();
-	};
-	Acts.prototype.SetFontColor = function (rgb)
-	{
-		var newcolor = "rgb(" + cr.GetRValue(rgb).toString() + "," + cr.GetGValue(rgb).toString() + "," + cr.GetBValue(rgb).toString() + ")";
-		if (newcolor === this.color)
-			return;
-		this.color = newcolor;
-		this.need_text_redraw = true;
-		this.runtime.redraw = true;
-	};
-	Acts.prototype.SetWebFont = function (familyname_, cssurl_)
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Text plugin: 'Set web font' not supported on this platform - the action has been ignored");
-			return;		// DC todo
-		}
-		var self = this;
-		var refreshFunc = (function () {
-							self.runtime.redraw = true;
-							self.text_changed = true;
-						});
-		if (requestedWebFonts.hasOwnProperty(cssurl_))
-		{
-			var newfacename = "'" + familyname_ + "'";
-			if (this.facename === newfacename)
-				return;	// no change
-			this.facename = newfacename;
-			this.updateFont();
-			for (var i = 1; i < 10; i++)
-			{
-				setTimeout(refreshFunc, i * 100);
-				setTimeout(refreshFunc, i * 1000);
-			}
-			return;
-		}
-		var wf = document.createElement("link");
-		wf.href = cssurl_;
-		wf.rel = "stylesheet";
-		wf.type = "text/css";
-		wf.onload = refreshFunc;
-		document.getElementsByTagName('head')[0].appendChild(wf);
-		requestedWebFonts[cssurl_] = true;
-		this.facename = "'" + familyname_ + "'";
-		this.updateFont();
-		for (var i = 1; i < 10; i++)
-		{
-			setTimeout(refreshFunc, i * 100);
-			setTimeout(refreshFunc, i * 1000);
-		}
-;
-	};
-	Acts.prototype.SetEffect = function (effect)
-	{
-		this.blend_mode = effect;
-		this.compositeOp = cr.effectToCompositeOp(effect);
-		cr.setGLBlend(this, effect, this.runtime.gl);
-		this.runtime.redraw = true;
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.Text = function(ret)
-	{
-		ret.set_string(this.text);
-	};
-	Exps.prototype.FaceName = function (ret)
-	{
-		ret.set_string(this.facename);
-	};
-	Exps.prototype.FaceSize = function (ret)
-	{
-		ret.set_int(this.ptSize);
-	};
-	Exps.prototype.TextWidth = function (ret)
-	{
-		var w = 0;
-		var i, len, x;
-		for (i = 0, len = this.lines.length; i < len; i++)
-		{
-			x = this.lines[i].width;
-			if (w < x)
-				w = x;
-		}
-		ret.set_int(w);
-	};
-	Exps.prototype.TextHeight = function (ret)
-	{
-		ret.set_int(this.lines.length * (this.pxHeight + this.line_height_offset) - this.line_height_offset);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.TextBox = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.TextBox.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	var elemTypes = ["text", "password", "email", "number", "tel", "url"];
-	if (navigator.userAgent.indexOf("MSIE 9") > -1)
-	{
-		elemTypes[2] = "text";
-		elemTypes[3] = "text";
-		elemTypes[4] = "text";
-		elemTypes[5] = "text";
-	}
-	instanceProto.onCreate = function()
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Textbox plugin not supported on this platform - the object will not be created");
-			return;
-		}
-		if (this.properties[7] === 6)	// textarea
-		{
-			this.elem = document.createElement("textarea");
-			jQuery(this.elem).css("resize", "none");
-		}
-		else
-		{
-			this.elem = document.createElement("input");
-			this.elem.type = elemTypes[this.properties[7]];
-		}
-		this.elem.id = this.properties[9];
-		jQuery(this.elem).appendTo(this.runtime.canvasdiv ? this.runtime.canvasdiv : "body");
-		this.elem["autocomplete"] = "off";
-		this.elem.value = this.properties[0];
-		this.elem["placeholder"] = this.properties[1];
-		this.elem.title = this.properties[2];
-		this.elem.disabled = (this.properties[4] === 0);
-		this.elem["readOnly"] = (this.properties[5] === 1);
-		this.elem["spellcheck"] = (this.properties[6] === 1);
-		this.autoFontSize = (this.properties[8] !== 0);
-		this.element_hidden = false;
-		if (this.properties[3] === 0)
-		{
-			jQuery(this.elem).hide();
-			this.visible = false;
-			this.element_hidden = true;
-		}
-		var onchangetrigger = (function (self) {
-			return function() {
-				self.runtime.trigger(cr.plugins_.TextBox.prototype.cnds.OnTextChanged, self);
-			};
-		})(this);
-		this.elem["oninput"] = onchangetrigger;
-		if (navigator.userAgent.indexOf("MSIE") !== -1)
-			this.elem["oncut"] = onchangetrigger;
-		this.elem.onclick = (function (self) {
-			return function(e) {
-				e.stopPropagation();
-				self.runtime.isInUserInputEvent = true;
-				self.runtime.trigger(cr.plugins_.TextBox.prototype.cnds.OnClicked, self);
-				self.runtime.isInUserInputEvent = false;
-			};
-		})(this);
-		this.elem.ondblclick = (function (self) {
-			return function(e) {
-				e.stopPropagation();
-				self.runtime.isInUserInputEvent = true;
-				self.runtime.trigger(cr.plugins_.TextBox.prototype.cnds.OnDoubleClicked, self);
-				self.runtime.isInUserInputEvent = false;
-			};
-		})(this);
-		this.elem.addEventListener("touchstart", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchmove", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchend", function (e) {
-			e.stopPropagation();
-		}, false);
-		jQuery(this.elem).mousedown(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).mouseup(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).keydown(function (e) {
-			if (e.which !== 13 && e.which != 27)	// allow enter and escape
-				e.stopPropagation();
-		});
-		jQuery(this.elem).keyup(function (e) {
-			if (e.which !== 13 && e.which != 27)	// allow enter and escape
-				e.stopPropagation();
-		});
-		this.lastLeft = 0;
-		this.lastTop = 0;
-		this.lastRight = 0;
-		this.lastBottom = 0;
-		this.lastWinWidth = 0;
-		this.lastWinHeight = 0;
-		this.updatePosition(true);
-		this.runtime.tickMe(this);
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		return {
-			"text": this.elem.value,
-			"placeholder": this.elem.placeholder,
-			"tooltip": this.elem.title,
-			"disabled": !!this.elem.disabled,
-			"readonly": !!this.elem.readOnly,
-			"spellcheck": !!this.elem["spellcheck"]
-		};
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.elem.value = o["text"];
-		this.elem.placeholder = o["placeholder"];
-		this.elem.title = o["tooltip"];
-		this.elem.disabled = o["disabled"];
-		this.elem.readOnly = o["readonly"];
-		this.elem["spellcheck"] = o["spellcheck"];
-	};
-	instanceProto.onDestroy = function ()
-	{
-		if (this.runtime.isDomFree)
-				return;
-		jQuery(this.elem).remove();
-		this.elem = null;
-	};
-	instanceProto.tick = function ()
-	{
-		this.updatePosition();
-	};
-	instanceProto.updatePosition = function (first)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		var left = this.layer.layerToCanvas(this.x, this.y, true);
-		var top = this.layer.layerToCanvas(this.x, this.y, false);
-		var right = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, true);
-		var bottom = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, false);
-		var rightEdge = this.runtime.width / this.runtime.devicePixelRatio;
-		var bottomEdge = this.runtime.height / this.runtime.devicePixelRatio;
-		if (!this.visible || !this.layer.visible || right <= 0 || bottom <= 0 || left >= rightEdge || top >= bottomEdge)
-		{
-			if (!this.element_hidden)
-				jQuery(this.elem).hide();
-			this.element_hidden = true;
-			return;
-		}
-		if (left < 1)
-			left = 1;
-		if (top < 1)
-			top = 1;
-		if (right >= rightEdge)
-			right = rightEdge - 1;
-		if (bottom >= bottomEdge)
-			bottom = bottomEdge - 1;
-		var curWinWidth = window.innerWidth;
-		var curWinHeight = window.innerHeight;
-		if (!first && this.lastLeft === left && this.lastTop === top && this.lastRight === right && this.lastBottom === bottom && this.lastWinWidth === curWinWidth && this.lastWinHeight === curWinHeight)
-		{
-			if (this.element_hidden)
-			{
-				jQuery(this.elem).show();
-				this.element_hidden = false;
-			}
-			return;
-		}
-		this.lastLeft = left;
-		this.lastTop = top;
-		this.lastRight = right;
-		this.lastBottom = bottom;
-		this.lastWinWidth = curWinWidth;
-		this.lastWinHeight = curWinHeight;
-		if (this.element_hidden)
-		{
-			jQuery(this.elem).show();
-			this.element_hidden = false;
-		}
-		var offx = Math.round(left) + jQuery(this.runtime.canvas).offset().left;
-		var offy = Math.round(top) + jQuery(this.runtime.canvas).offset().top;
-		jQuery(this.elem).css("position", "absolute");
-		jQuery(this.elem).offset({left: offx, top: offy});
-		jQuery(this.elem).width(Math.round(right - left));
-		jQuery(this.elem).height(Math.round(bottom - top));
-		if (this.autoFontSize)
-			jQuery(this.elem).css("font-size", ((this.layer.getScale(true) / this.runtime.devicePixelRatio) - 0.2) + "em");
-	};
-	instanceProto.draw = function(ctx)
-	{
-	};
-	instanceProto.drawGL = function(glw)
-	{
-	};
-	function Cnds() {};
-	Cnds.prototype.CompareText = function (text, case_)
-	{
-		if (this.runtime.isDomFree)
-			return false;
-		if (case_ === 0)	// insensitive
-			return cr.equals_nocase(this.elem.value, text);
-		else
-			return this.elem.value === text;
-	};
-	Cnds.prototype.OnTextChanged = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnClicked = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnDoubleClicked = function ()
-	{
-		return true;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetText = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.value = text;
-	};
-	Acts.prototype.SetPlaceholder = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.placeholder = text;
-	};
-	Acts.prototype.SetTooltip = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.title = text;
-	};
-	Acts.prototype.SetVisible = function (vis)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.visible = (vis !== 0);
-	};
-	Acts.prototype.SetEnabled = function (en)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.disabled = (en === 0);
-	};
-	Acts.prototype.SetReadOnly = function (ro)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.readOnly = (ro === 0);
-	};
-	Acts.prototype.SetFocus = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.focus();
-	};
-	Acts.prototype.SetBlur = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.blur();
-	};
-	Acts.prototype.SetCSSStyle = function (p, v)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).css(p, v);
-	};
-	Acts.prototype.ScrollToBottom = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.scrollTop = this.elem.scrollHeight;
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.Text = function (ret)
-	{
-		if (this.runtime.isDomFree)
-		{
-			ret.set_string("");
-			return;
-		}
-		ret.set_string(this.elem.value);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.TiledBg = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.TiledBg.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-		if (this.is_family)
-			return;
-		this.texture_img = new Image();
-		this.texture_img.cr_filesize = this.texture_filesize;
-		this.runtime.waitForImageLoad(this.texture_img, this.texture_file);
-		this.pattern = null;
-		this.webGL_texture = null;
-	};
-	typeProto.onLostWebGLContext = function ()
-	{
-		if (this.is_family)
-			return;
-		this.webGL_texture = null;
-	};
-	typeProto.onRestoreWebGLContext = function ()
-	{
-		if (this.is_family || !this.instances.length)
-			return;
-		if (!this.webGL_texture)
-		{
-			this.webGL_texture = this.runtime.glwrap.loadTexture(this.texture_img, true, this.runtime.linearSampling, this.texture_pixelformat);
-		}
-		var i, len;
-		for (i = 0, len = this.instances.length; i < len; i++)
-			this.instances[i].webGL_texture = this.webGL_texture;
-	};
-	typeProto.loadTextures = function ()
-	{
-		if (this.is_family || this.webGL_texture || !this.runtime.glwrap)
-			return;
-		this.webGL_texture = this.runtime.glwrap.loadTexture(this.texture_img, true, this.runtime.linearSampling, this.texture_pixelformat);
-	};
-	typeProto.unloadTextures = function ()
-	{
-		if (this.is_family || this.instances.length || !this.webGL_texture)
-			return;
-		this.runtime.glwrap.deleteTexture(this.webGL_texture);
-		this.webGL_texture = null;
-	};
-	typeProto.preloadCanvas2D = function (ctx)
-	{
-		ctx.drawImage(this.texture_img, 0, 0);
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function()
-	{
-		this.visible = (this.properties[0] === 0);							// 0=visible, 1=invisible
-		this.rcTex = new cr.rect(0, 0, 0, 0);
-		this.has_own_texture = false;										// true if a texture loaded in from URL
-		this.texture_img = this.type.texture_img;
-		if (this.runtime.glwrap)
-		{
-			this.type.loadTextures();
-			this.webGL_texture = this.type.webGL_texture;
-		}
-		else
-		{
-			if (!this.type.pattern)
-				this.type.pattern = this.runtime.ctx.createPattern(this.type.texture_img, "repeat");
-			this.pattern = this.type.pattern;
-		}
-	};
-	instanceProto.afterLoad = function ()
-	{
-		this.has_own_texture = false;
-		this.texture_img = this.type.texture_img;
-	};
-	instanceProto.onDestroy = function ()
-	{
-		if (this.runtime.glwrap && this.has_own_texture && this.webGL_texture)
-		{
-			this.runtime.glwrap.deleteTexture(this.webGL_texture);
-			this.webGL_texture = null;
-		}
-	};
-	instanceProto.draw = function(ctx)
-	{
-		ctx.globalAlpha = this.opacity;
-		ctx.save();
-		ctx.fillStyle = this.pattern;
-		var myx = this.x;
-		var myy = this.y;
-		if (this.runtime.pixel_rounding)
-		{
-			myx = Math.round(myx);
-			myy = Math.round(myy);
-		}
-		var drawX = -(this.hotspotX * this.width);
-		var drawY = -(this.hotspotY * this.height);
-		var offX = drawX % this.texture_img.width;
-		var offY = drawY % this.texture_img.height;
-		if (offX < 0)
-			offX += this.texture_img.width;
-		if (offY < 0)
-			offY += this.texture_img.height;
-		ctx.translate(myx, myy);
-		ctx.rotate(this.angle);
-		ctx.translate(offX, offY);
-		ctx.fillRect(drawX - offX,
-					 drawY - offY,
-					 this.width,
-					 this.height);
-		ctx.restore();
-	};
-	instanceProto.drawGL_earlyZPass = function(glw)
-	{
-		this.drawGL(glw);
-	};
-	instanceProto.drawGL = function(glw)
-	{
-		glw.setTexture(this.webGL_texture);
-		glw.setOpacity(this.opacity);
-		var rcTex = this.rcTex;
-		rcTex.right = this.width / this.texture_img.width;
-		rcTex.bottom = this.height / this.texture_img.height;
-		var q = this.bquad;
-		if (this.runtime.pixel_rounding)
-		{
-			var ox = Math.round(this.x) - this.x;
-			var oy = Math.round(this.y) - this.y;
-			glw.quadTex(q.tlx + ox, q.tly + oy, q.trx + ox, q.try_ + oy, q.brx + ox, q.bry + oy, q.blx + ox, q.bly + oy, rcTex);
-		}
-		else
-			glw.quadTex(q.tlx, q.tly, q.trx, q.try_, q.brx, q.bry, q.blx, q.bly, rcTex);
-	};
-	function Cnds() {};
-	Cnds.prototype.OnURLLoaded = function ()
-	{
-		return true;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetEffect = function (effect)
-	{
-		this.blend_mode = effect;
-		this.compositeOp = cr.effectToCompositeOp(effect);
-		cr.setGLBlend(this, effect, this.runtime.gl);
-		this.runtime.redraw = true;
-	};
-	Acts.prototype.LoadURL = function (url_)
-	{
-		var img = new Image();
-		var self = this;
-		img.onload = function ()
-		{
-			self.texture_img = img;
-			if (self.runtime.glwrap)
-			{
-				if (self.has_own_texture && self.webGL_texture)
-					self.runtime.glwrap.deleteTexture(self.webGL_texture);
-				self.webGL_texture = self.runtime.glwrap.loadTexture(img, true, self.runtime.linearSampling);
-			}
-			else
-			{
-				self.pattern = self.runtime.ctx.createPattern(img, "repeat");
-			}
-			self.has_own_texture = true;
-			self.runtime.redraw = true;
-			self.runtime.trigger(cr.plugins_.TiledBg.prototype.cnds.OnURLLoaded, self);
-		};
-		if (url_.substr(0, 5) !== "data:")
-			img.crossOrigin = "anonymous";
-		this.runtime.setImageSrc(img, url_);
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.ImageWidth = function (ret)
-	{
-		ret.set_float(this.texture_img.width);
-	};
-	Exps.prototype.ImageHeight = function (ret)
-	{
-		ret.set_float(this.texture_img.height);
 	};
 	pluginProto.exps = new Exps();
 }());
@@ -25773,1612 +19944,6 @@ cr.plugins_.Touch = function(runtime)
 }());
 ;
 ;
-cr.plugins_.gamepad = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.gamepad.prototype;
-	var isSupported = false;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-		isSupported = !!(navigator["getGamepads"] || navigator["webkitGetGamepads"] || navigator["mozGetGamepads"] || navigator["gamepads"] || navigator["webkitGamepads"] || navigator["MozGamepads"] || window["cr_getGamepads"]);
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	var gamepadRuntime = null;
-	var gamepadInstance = null;
-	var controllers = new Array(16);
-	var padStates = new Array(16);
-	var padOldStates = new Array(16);
-	var osToken = "";
-	var browserToken = "";
-	function getPadState(i)
-	{
-		var j;
-		if (!padStates[i])
-		{
-			padStates[i] = new Array(20);
-			for (j = 0; j < 20; ++j)
-				padStates[i][j] = 0;
-		}
-		return padStates[i];
-	};
-	function getPadOldState(i)
-	{
-		var j;
-		if (!padOldStates[i])
-		{
-			padOldStates[i] = new Array(20);
-			for (j = 0; j < 20; ++j)
-				padOldStates[i][j] = 0;
-		}
-		return padOldStates[i];
-	};
-	function updatePadOldState(i)
-	{
-		var cur = getPadState(i);
-		var old = getPadOldState(i);
-		var j;
-		for (j = 0; j < 20; ++j)
-			old[j] = cur[j];
-	};
-	function clearPadState(i)
-	{
-		padStates[i] = null;
-		padOldStates[i] = null;
-	};
-	var axisOffset = 16;
-	var curCtrlMap = null;
-	var ctrlmap = {};
-	ctrlmap["windows"] = {};
-	ctrlmap["windows"]["firefox"] = {};
-	function doControllerMapping(index, isAxis, buttonmap, axismap)
-	{
-		if (isAxis)
-		{
-			if (index >= axismap.length)
-				return -1;			// unknown axis
-			if (cr.is_number(axismap[index]))
-				return axismap[index] + axisOffset;
-			else
-			{
-				return axismap[index];	// returning array
-			}
-		}
-		else
-		{
-			if (index >= buttonmap.length)
-				return -1;			// unknown button
-			return buttonmap[index];
-		}
-	};
-	var win_ff_xbox360_buttons = [0, 1, 2, 3, 4, 5, 8, 9, 10, 11];
-	var win_ff_xbox360_axes    = [0, 1, [7, 6], 2, 3, [14, 15], [12, 13]];
-	ctrlmap["windows"]["firefox"]["xbox360"] = function (index, isAxis)
-	{
-		return doControllerMapping(index, isAxis, win_ff_xbox360_buttons, win_ff_xbox360_axes);
-	};
-	var win_ff_lda_buttons = [2, 0, 1, 3, 4, 6, 5, 7, 8, 9];
-	var win_ff_lda_axes    = [0, 1, 2, 3, [14, 15], [12, 13]];
-	ctrlmap["windows"]["firefox"]["logitechdualaction"] = function (index, isAxis)
-	{
-		return doControllerMapping(index, isAxis, win_ff_lda_buttons, win_ff_lda_axes);
-	};
-	function defaultMap(index, isAxis)
-	{
-		if (isAxis)
-		{
-			if (index >= 4)
-				return -1;		// unknown axis
-			return index + axisOffset;
-		}
-		else
-		{
-			if (index >= 16)
-				return -1;		// unknown button
-			return index;
-		}
-	};
-	function getMapper(id_)
-	{
-		if (!curCtrlMap)
-			return defaultMap;
-		var controllertoken = "";
-		var id = id_.toLowerCase();
-		if (id.indexOf("xbox 360") > -1)
-			controllertoken = "xbox360";
-		else if (id.indexOf("logitech dual action") > -1)
-			controllertoken = "logitechdualaction";
-		var curmap = curCtrlMap[controllertoken];
-		return curmap || defaultMap;
-	};
-	function onConnected(e)
-	{
-		controllers[e["gamepad"]["index"]] = e["gamepad"];
-		gamepadRuntime.trigger(cr.plugins_.gamepad.prototype.cnds.OnGamepadConnected, gamepadInstance);
-	};
-	function onDisconnected(e)
-	{
-		gamepadRuntime.trigger(cr.plugins_.gamepad.prototype.cnds.OnGamepadDisconnected, gamepadInstance);
-		controllers[e["gamepad"]["index"]] = null;
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-		gamepadRuntime = this.runtime;
-		gamepadInstance = this;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function()
-	{
-		this.deadzone = this.properties[0];
-		this.lastButton = 0;
-		var userAgent = navigator.userAgent;
-		osToken = "windows";
-		if (/mac/i.test(userAgent))
-			osToken = "mac";
-		curCtrlMap = ctrlmap[osToken];
-		browserToken = "chrome";
-		if (/firefox/i.test(userAgent))
-			browserToken = "firefox";
-		if (curCtrlMap)
-			curCtrlMap = curCtrlMap[browserToken];
-		window.addEventListener("webkitgamepadconnected", onConnected, false);
-		window.addEventListener("webkitgamepaddisconnected", onDisconnected, false);
-		window.addEventListener("MozGamepadConnected", onConnected, false);
-		window.addEventListener("MozGamepadDisconnected", onDisconnected, false);
-		window.addEventListener("gamepadconnected", onConnected, false);
-		window.addEventListener("gamepaddisconnected", onDisconnected, false);
-		this.runtime.tickMe(this);
-		this.activeControllers = [];
-	};
-	instanceProto.tick = function ()
-	{
-		this.activeControllers.length = 0;
-		var gamepads = null;
-		var synthetic = false;
-		if (navigator["getGamepads"])
-			gamepads = navigator["getGamepads"]();
-		else if (navigator["webkitGetGamepads"])
-			gamepads = navigator["webkitGetGamepads"]();
-		else if (navigator["mozGetGamepads"])
-			gamepads = navigator["mozGetGamepads"]();
-		else if (navigator["msGetGamepads"])
-			gamepads = navigator["msGetGamepads"]();
-		else if (this.runtime.isWindows8Capable && window["cr_getGamepads"])
-		{
-			gamepads = window["cr_getGamepads"]();
-			synthetic = true;
-		}
-		else
-			gamepads = navigator["gamepads"] || navigator["webkitGamepads"] || navigator["MozGamepads"] || controllers;
-		if (!gamepads)
-			return;
-		var i, len, j, lenj, mapfunc, index, value;
-		for (i = 0, len = gamepads.length; i < len; i++)
-		{
-			var pad = gamepads[i];
-			if (!pad)
-			{
-				clearPadState(i);
-				continue;
-			}
-			var state = getPadState(i);
-			var oldstate = getPadOldState(i);
-			updatePadOldState(i);
-			mapfunc = (synthetic ? defaultMap : getMapper(pad.id));
-			for (j = 0, lenj = pad["buttons"].length; j < lenj; j++)
-			{
-				if (typeof pad["buttons"][j]["value"] !== "undefined")
-					value = pad["buttons"][j]["value"];
-				else
-					value = pad["buttons"][j];
-				index = mapfunc(j, false, value);
-				if (index >= 0 && index < 20)
-				{
-					state[index] = value * 100;
-					if (state[index] >= 50 && oldstate[index] < 50)
-						this.lastButton = index;
-				}
-			}
-			for (j = 0, lenj = pad["axes"].length; j < lenj; j++)
-			{
-				value = pad["axes"][j];
-				index = mapfunc(j, true, value);
-				if (cr.is_number(index))
-				{
-					if (index >= 0 && index < 20)
-						state[index] = value * 100;
-				}
-				else
-				{
-					state[index[0]] = 0;
-					state[index[1]] = 0;
-					if (value <= 0)
-						state[index[0]] = Math.abs(value * 100);
-					else
-						state[index[1]] = Math.abs(value * 100);
-				}
-			}
-			this.activeControllers.push(pad);
-		}
-		for ( ; i < 20; ++i)
-			clearPadState(i);
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		return { "lastButton": this.lastButton };
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.lastButton = o["lastButton"];
-	};
-	function Cnds() {};
-	Cnds.prototype.SupportsGamepad = function ()
-	{
-		return isSupported;
-	};
-	Cnds.prototype.OnGamepadConnected = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnGamepadDisconnected = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.IsButtonDown = function (gamepad, button)
-	{
-		gamepad = Math.floor(gamepad);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-			return false;
-		var state = getPadState(gamepad);
-		if (!state)
-			return false;
-		var ret = state[button] >= 50;
-		if (ret)
-			this.lastButton = button;
-		return ret;
-	};
-	Cnds.prototype.OnButtonDown = function (gamepad, button)
-	{
-		gamepad = Math.floor(gamepad);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-			return false;
-		var state = getPadState(gamepad);
-		var oldstate = getPadOldState(gamepad);
-		if (!state || !oldstate)
-			return false;
-		var ret = state[button] >= 50 && oldstate[button] < 50;
-		if (ret)
-			this.lastButton = button;
-		return ret;
-	};
-	Cnds.prototype.OnButtonUp = function (gamepad, button)
-	{
-		gamepad = Math.floor(gamepad);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-			return false;
-		var state = getPadState(gamepad);
-		var oldstate = getPadOldState(gamepad);
-		if (!state || !oldstate)
-			return false;
-		var ret = state[button] < 50 && oldstate[button] >= 50;
-		if (ret)
-			this.lastButton = button;
-		return ret;
-	};
-	Cnds.prototype.HasGamepads = function ()
-	{
-		return this.activeControllers.length > 0;
-	};
-	Cnds.prototype.CompareAxis = function (gamepad, axis, comparison, value)
-	{
-		gamepad = Math.floor(gamepad);
-		axis = Math.floor(axis);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-			return false;
-		var state = getPadState(gamepad);
-		if (!state)
-			return;
-		var axisvalue = state[axis + axisOffset];
-		var othervalue = 0;
-		if (axis % 2 === 0)										// is X axis
-			othervalue = state[axis + axisOffset + 1];	// get next axis (Y)
-		else
-			othervalue = state[axis + axisOffset - 1];	// get previous axis (X)
-		if (Math.sqrt(axisvalue * axisvalue + othervalue * othervalue) <= this.deadzone)
-			axisvalue = 0;
-		return cr.do_cmp(axisvalue, comparison, value);
-	};
-	Cnds.prototype.OnAnyButtonDown = function (gamepad)
-	{
-		gamepad = Math.floor(gamepad);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-			return false;
-		var state = getPadState(gamepad);
-		var oldstate = getPadOldState(gamepad);
-		if (!state || !oldstate)
-			return false;
-		var i, len;
-		for (i = 0, len = state.length; i < len; i++)
-		{
-			if (state[i] >= 50 && oldstate[i] < 50)
-			{
-				this.lastButton = i;
-				return true;
-			}
-		}
-		return false;
-	};
-	Cnds.prototype.OnAnyButtonUp = function (gamepad)
-	{
-		gamepad = Math.floor(gamepad);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-			return false;
-		var state = getPadState(gamepad);
-		var oldstate = getPadOldState(gamepad);
-		if (!state || !oldstate)
-			return false;
-		var i, len;
-		for (i = 0, len = state.length; i < len; i++)
-		{
-			if (state[i] < 50 && oldstate[i] >= 50)
-			{
-				this.lastButton = i;
-				return true;
-			}
-		}
-		return false;
-	};
-	Cnds.prototype.IsButtonIndexDown = function (gamepad, button)
-	{
-		gamepad = Math.floor(gamepad);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-			return false;
-		var state = getPadState(gamepad);
-		if (!state)
-			return false;
-		button = Math.floor(button);
-		if (button < 0 || button >= state.length)
-			return false;
-		var ret = state[button] >= 50;
-		if (ret)
-			this.lastButton = button;
-		return ret;
-	};
-	Cnds.prototype.OnButtonIndexDown = function (gamepad, button)
-	{
-		gamepad = Math.floor(gamepad);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-			return false;
-		var state = getPadState(gamepad);
-		var oldstate = getPadOldState(gamepad);
-		if (!state || !oldstate)
-			return false;
-		button = Math.floor(button);
-		if (button < 0 || button >= state.length)
-			return false;
-		var ret = state[button] >= 50 && oldstate[button] < 50;
-		if (ret)
-			this.lastButton = button;
-		return ret;
-	};
-	Cnds.prototype.OnButtonIndexUp = function (gamepad, button)
-	{
-		gamepad = Math.floor(gamepad);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-			return false;
-		var state = getPadState(gamepad);
-		var oldstate = getPadOldState(gamepad);
-		if (!state || !oldstate)
-			return false;
-		button = Math.floor(button);
-		if (button < 0 || button >= state.length)
-			return false;
-		var ret = state[button] < 50 && oldstate[button] >= 50;
-		if (ret)
-			this.lastButton = button;
-		return ret;
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.GamepadCount = function (ret)
-	{
-		ret.set_int(this.activeControllers.length);
-	};
-	Exps.prototype.GamepadID = function (ret, index)
-	{
-		if (index < 0 || index >= this.activeControllers.length)
-		{
-			ret.set_string("");
-			return;
-		}
-		ret.set_string(this.activeControllers[index].id);
-	};
-	Exps.prototype.GamepadAxes = function (ret, index)
-	{
-		if (index < 0 || index >= this.activeControllers.length)
-		{
-			ret.set_string("");
-			return;
-		}
-		var axes = this.activeControllers[index]["axes"];
-		var str = "";
-		var i, len;
-		for (i = 0, len = axes.length; i < len; i++)
-		{
-			str += "Axis " + i + ": " + Math.round(axes[i] * 100) + "\n";
-		}
-		ret.set_string(str);
-	};
-	Exps.prototype.GamepadButtons = function (ret, index)
-	{
-		if (index < 0 || index >= this.activeControllers.length)
-		{
-			ret.set_string("");
-			return;
-		}
-		var buttons = this.activeControllers[index]["buttons"];
-		var str = "";
-		var i, len, value;
-		for (i = 0, len = buttons.length; i < len; i++)
-		{
-			if (typeof buttons[i]["value"] !== "undefined")
-				value = buttons[i]["value"];
-			else
-				value = buttons[i];
-			str += "Button " + i + ": " + Math.round(value * 100) + "\n";
-		}
-		ret.set_string(str);
-	};
-	Exps.prototype.RawButton = function (ret, gamepad, index)
-	{
-		gamepad = Math.floor(gamepad);
-		index = Math.floor(index);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-		{
-			ret.set_float(0);
-			return;
-		}
-		var state = this.activeControllers[gamepad]["buttons"];
-		if (!state || index < 0 || index >= state.length)
-		{
-			ret.set_float(0);
-			return;
-		}
-		if (typeof state[index]["value"] !== "undefined")
-			ret.set_float(state[index]["value"]);
-		else
-			ret.set_float(state[index]);
-	};
-	Exps.prototype.RawAxis = function (ret, gamepad, index)
-	{
-		gamepad = Math.floor(gamepad);
-		index = Math.floor(index);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-		{
-			ret.set_float(0);
-			return;
-		}
-		var state = this.activeControllers[gamepad]["axes"];
-		if (!state || index < 0 || index >= state.length)
-		{
-			ret.set_float(0);
-			return;
-		}
-		ret.set_float(state[index]);
-	};
-	Exps.prototype.RawButtonCount = function (ret, gamepad)
-	{
-		gamepad = Math.floor(gamepad);
-		index = Math.floor(index);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-		{
-			ret.set_int(0);
-			return;
-		}
-		ret.set_int(this.activeControllers[gamepad]["buttons"].length);
-	};
-	Exps.prototype.RawAxisCount = function (ret, gamepad)
-	{
-		gamepad = Math.floor(gamepad);
-		index = Math.floor(index);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-		{
-			ret.set_int(0);
-			return;
-		}
-		ret.set_int(this.activeControllers[gamepad]["axes"].length);
-	};
-	Exps.prototype.Button = function (ret, gamepad, index)
-	{
-		gamepad = Math.floor(gamepad);
-		index = Math.floor(index);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-		{
-			ret.set_float(0);
-			return;
-		}
-		var state = getPadState(gamepad);
-		if (!state || index < 0 || index >= axisOffset)
-		{
-			ret.set_float(0);
-			return;
-		}
-		ret.set_float(state[index]);
-	};
-	Exps.prototype.Axis = function (ret, gamepad, index)
-	{
-		gamepad = Math.floor(gamepad);
-		index = Math.floor(index);
-		if (gamepad < 0 || gamepad >= this.activeControllers.length)
-		{
-			ret.set_float(0);
-			return;
-		}
-		var state = getPadState(gamepad);
-		if (!state || index < 0 || index >= 4)
-		{
-			ret.set_float(0);
-			return;
-		}
-		var value = state[index + axisOffset];
-		var othervalue = 0;
-		if (index % 2 === 0)								// is X axis
-			othervalue = state[index + axisOffset + 1];		// get next axis (Y)
-		else
-			othervalue = state[index + axisOffset - 1];		// get previous axis (X)
-		if (Math.sqrt(value * value + othervalue * othervalue) <= this.deadzone)
-			value = 0;
-		ret.set_float(value);
-	};
-	Exps.prototype.LastButton = function (ret)
-	{
-		ret.set_int(this.lastButton);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.progressbar = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.progressbar.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function()
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Progress Bar plugin not supported on this platform - the object will not be created");
-			return;
-		}
-		this.elem = document.createElement("progress");
-		this.value = this.properties[0];
-		this.max = this.properties[1];
-		if (this.max > 0 && this.value >= 0)
-		{
-			this.elem["max"] = this.max;
-			this.elem["value"] = this.value;
-		}
-		this.elem.id = this.properties[4];
-		this.elem.title = this.properties[2];
-		jQuery(this.elem).appendTo(this.runtime.canvasdiv ? this.runtime.canvasdiv : "body");
-		this.element_hidden = false;
-		if (this.properties[3] === 0)
-		{
-			jQuery(this.elem).hide();
-			this.visible = false;
-			this.element_hidden = true;
-		}
-		this.elem.onclick = (function (self) {
-			return function(e) {
-				e.stopPropagation();
-				self.runtime.isInUserInputEvent = true;
-				self.runtime.trigger(cr.plugins_.progressbar.prototype.cnds.OnClicked, self);
-				self.runtime.isInUserInputEvent = false;
-			};
-		})(this);
-		this.elem.addEventListener("touchstart", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchmove", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchend", function (e) {
-			e.stopPropagation();
-		}, false);
-		jQuery(this.elem).mousedown(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).mouseup(function (e) {
-			e.stopPropagation();
-		});
-		this.lastLeft = 0;
-		this.lastTop = 0;
-		this.lastRight = 0;
-		this.lastBottom = 0;
-		this.lastWinWidth = 0;
-		this.lastWinHeight = 0;
-		this.updatePosition(true);
-		this.runtime.tickMe(this);
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		var o = {
-			"v": this.elem["value"],
-			"m": this.elem["max"]
-		};
-		return o;
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.elem["value"] = o["v"];
-		this.elem["max"] = o["m"];
-	};
-	instanceProto.onDestroy = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).remove();
-		this.elem = null;
-	};
-	instanceProto.tick = function ()
-	{
-		this.updatePosition();
-	};
-	var last_canvas_offset = null;
-	var last_checked_tick = -1;
-	instanceProto.updatePosition = function (first)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		var left = this.layer.layerToCanvas(this.x, this.y, true);
-		var top = this.layer.layerToCanvas(this.x, this.y, false);
-		var right = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, true);
-		var bottom = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, false);
-		var rightEdge = this.runtime.width / this.runtime.devicePixelRatio;
-		var bottomEdge = this.runtime.height / this.runtime.devicePixelRatio;
-		if (!this.visible || !this.layer.visible || right <= 0 || bottom <= 0 || left >= rightEdge || top >= bottomEdge)
-		{
-			if (!this.element_hidden)
-				jQuery(this.elem).hide();
-			this.element_hidden = true;
-			return;
-		}
-		if (left < 1)
-			left = 1;
-		if (top < 1)
-			top = 1;
-		if (right >= rightEdge)
-			right = rightEdge - 1;
-		if (bottom >= bottomEdge)
-			bottom = bottomEdge - 1;
-		var curWinWidth = window.innerWidth;
-		var curWinHeight = window.innerHeight;
-		if (!first && this.lastLeft === left && this.lastTop === top && this.lastRight === right && this.lastBottom === bottom && this.lastWinWidth === curWinWidth && this.lastWinHeight === curWinHeight)
-		{
-			if (this.element_hidden)
-			{
-				jQuery(this.elem).show();
-				this.element_hidden = false;
-			}
-			return;
-		}
-		this.lastLeft = left;
-		this.lastTop = top;
-		this.lastRight = right;
-		this.lastBottom = bottom;
-		this.lastWinWidth = curWinWidth;
-		this.lastWinHeight = curWinHeight;
-		if (this.element_hidden)
-		{
-			jQuery(this.elem).show();
-			this.element_hidden = false;
-		}
-		var offx = Math.round(left) + jQuery(this.runtime.canvas).offset().left;
-		var offy = Math.round(top) + jQuery(this.runtime.canvas).offset().top;
-		jQuery(this.elem).css("position", "absolute");
-		jQuery(this.elem).offset({left: offx, top: offy});
-		jQuery(this.elem).width(Math.round(right - left));
-		jQuery(this.elem).height(Math.round(bottom - top));
-	};
-	instanceProto.draw = function(ctx)
-	{
-	};
-	instanceProto.drawGL = function(glw)
-	{
-	};
-	function Cnds() {};
-	Cnds.prototype.OnClicked = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.CompareProgress = function (cmp, x)
-	{
-		if (this.isDomFree)
-			return false;
-		return cr.do_cmp(this.elem["value"], cmp, x);
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetTooltip = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.title = text;
-	};
-	Acts.prototype.SetVisible = function (vis)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.visible = (vis !== 0);
-	};
-	Acts.prototype.SetCSSStyle = function (p, v)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).css(p, v);
-	};
-	Acts.prototype.SetProgress = function (x)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.value = x;
-		this.elem["max"] = this.max;
-		this.elem["value"] = this.value;
-	};
-	Acts.prototype.SetMaximum = function (x)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.max = x;
-		this.elem["max"] = this.max;
-		this.elem["value"] = this.value;
-	};
-	Acts.prototype.SetIndeterminate = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.removeAttribute("value");
-		this.elem.removeAttribute("max");
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.Progress = function (ret)
-	{
-		ret.set_float(this.runtime.isDomFree ? 0 : this.elem["value"]);
-	};
-	Exps.prototype.Maximum = function (ret)
-	{
-		ret.set_float(this.runtime.isDomFree ? 0 : this.elem["max"]);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.shadowlight = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.shadowlight.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	var loaded_penumbra_img = false;
-	var penumbra_img = null;
-	var penumbra_data = null;
-	typeProto.onCreate = function()
-	{
-		if (this.is_family)
-			return;
-		if (!loaded_penumbra_img)
-		{
-			loaded_penumbra_img = true;
-			penumbra_img = new Image();
-			penumbra_img.cr_filesize = 15000;
-			this.runtime.waitForImageLoad(penumbra_img, "penumbra.png");
-		}
-	};
-	typeProto.onLostWebGLContext = function ()
-	{
-		if (this.is_family)
-			return;
-		this.webGL_texture = null;
-		this.penumbra_texture = null;
-		var i, len, inst;
-		for (i = 0, len = this.instances.length; i < len; ++i)
-		{
-			inst = this.instances[i];
-			inst.webGL_texture = null;
-			inst.penumbra_texture = null;
-		}
-	};
-	typeProto.onRestoreWebGLContext = function ()
-	{
-		if (this.is_family)
-			return;
-		var i, len;
-		for (i = 0, len = this.instances.length; i < len; ++i)
-		{
-			this.instances[i].createTextures();
-		}
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function()
-	{
-		maybeGetPenumbraData();		// get the pixel data for the penumbra image
-		this.lightX = this.x;
-		this.lightY = this.y;
-		this.lightZ = this.properties[0];
-		this.max_extrude = 1000;
-		this.lightRadius = this.properties[1];
-		this.castFrom = this.properties[2];		// 0 = all, 1 = same tag, 2 = different tag
-		this.tag = this.properties[3];
-		this.lightR = 0;
-		this.lightG = 0;
-		this.lightB = 0;
-		this.lastKnownX = this.x;
-		this.lastKnownY = this.y;
-		this.webGL_texture = null;
-		this.penumbra_texture = null;
-		if (this.runtime.glwrap)
-		{
-			this.createTextures();
-		}
-		else
-			this.lightRadius = 0;		// cannot use light radius in canvas2d mode
-		this.runtime.tick2Me(this);
-	};
-	instanceProto.castsFrom = function (othertag)
-	{
-		if (this.castFrom === 1)		// same tag
-			return cr.equals_nocase(this.tag, othertag);
-		else if (this.castFrom === 2)	// different tag
-			return !cr.equals_nocase(this.tag, othertag);
-		else							// all
-			return true;
-	};
-	instanceProto.tick2 = function ()
-	{
-		if (this.lastKnownX !== this.x || this.lastKnownY !== this.y)
-		{
-			this.lightX = this.x;
-			this.lightY = this.y;
-		}
-		var layer = this.layer;
-		var newx = (layer.viewLeft + layer.viewRight) / 2;
-		var newy = (layer.viewTop + layer.viewBottom) / 2;
-		var neww = layer.viewRight - layer.viewLeft;
-		var newh = layer.viewBottom - layer.viewTop;
-		if (newx !== this.x || newy !== this.y || neww !== this.width || newh !== this.height)
-		{
-			this.x = newx;
-			this.y = newy;
-			this.width = neww;
-			this.height = newh;
-			this.set_bbox_changed();
-		}
-		this.lastKnownX = this.x;
-		this.lastKnownY = this.y;
-		this.max_extrude = cr.distanceTo(layer.viewLeft, layer.viewTop, layer.viewRight, layer.viewBottom) * 1.5;
-	};
-	instanceProto.onDestroy = function ()
-	{
-		if (!this.runtime.glwrap)
-			return;		// not WebGL mode
-		if (this.webGL_texture)
-		{
-			this.runtime.glwrap.deleteTexture(this.webGL_texture);
-			this.webGL_texture = null;
-		}
-		if (this.penumbra_texture)
-		{
-			this.runtime.glwrap.deleteTexture(this.penumbra_texture);
-			this.penumbra_texture = null;
-		}
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		return {
-		};
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-	};
-	var casters = [];
-	var collrect_candidates = [];
-	instanceProto.getShadowCasterCandidates = function ()
-	{
-		if (!this.runtime.shadowcasterBehavior)
-			return;
-		this.runtime.getTypesCollisionCandidates(this.layer, this.runtime.shadowcasterBehavior.myTypes, this.bbox, casters);
-		cr.removeArrayDuplicates(casters);
-	};
-	var poly_pts = [];
-	var poly_len = 0;
-	var back_faces1 = [];
-	var back_faces2 = [];
-	var cw_edge1 = -1;		// index of clockwise edge face
-	var cw_edge2 = -1;
-	var acw_edge1 = -1;		// index of anticlockwise edge face
-	var acw_edge2 = -1;
-	var midx = 0;
-	var midy = 0;
-	var umbra_pts = [];
-	var cw_umbra_rootx = 0;
-	var cw_umbra_rooty = 0;
-	var cw_umbra_projx = 0;
-	var cw_umbra_projy = 0;
-	var acw_umbra_rootx = 0;
-	var acw_umbra_rooty = 0;
-	var acw_umbra_projx = 0;
-	var acw_umbra_projy = 0;
-	var temp_poly = new cr.CollisionPoly([]);
-	instanceProto.draw = function (ctx)
-	{
-		this.getShadowCasterCandidates();
-		ctx.save();
-		ctx.fillStyle = "rgba(" + this.lightR + "," + this.lightG + "," + this.lightB + "," + this.opacity + ")";
-		var i, len, inst, j, lenj, k, lenk, h, poly, tmx, tmy, offx, offy, c, tilerc;
-		for (i = 0, len = casters.length; i < len; ++i)
-		{
-			inst = casters[i];
-			if (!inst.extra["shadowcasterEnabled"] || !this.castsFrom(inst.extra["shadowcasterTag"]))
-				continue;
-			inst.update_bbox();
-			h = inst.extra["shadowcasterHeight"];
-			if (inst.tilemap_exists)
-			{
-				inst.getCollisionRectCandidates(this.bbox, collrect_candidates);
-				tmx = inst.x;
-				tmy = inst.y;
-				for (j = 0, lenj = collrect_candidates.length; j < lenj; ++j)
-				{
-					c = collrect_candidates[j];
-					tilerc = c.rc;
-					poly = null;
-					if (c.poly)
-					{
-						poly = c.poly;
-						offx = tilerc.left;
-						offy = tilerc.top;
-					}
-					else
-					{
-						temp_poly.set_from_rect(tilerc, 0, 0);
-						poly = temp_poly;
-						offx = 0;
-						offy = 0;
-					}
-					this.calcShadow(poly, tmx + offx, tmy + offy, h, false);
-					ctx.beginPath();
-					ctx.moveTo(umbra_pts[0], umbra_pts[1]);
-					for (k = 2, lenk = umbra_pts.length; k < lenk; k += 2)
-					{
-						ctx.lineTo(umbra_pts[k], umbra_pts[k + 1]);
-					}
-					ctx.closePath();
-					ctx.fill();
-					cr.clearArray(back_faces1);
-					cr.clearArray(umbra_pts);
-				}
-				cr.clearArray(collrect_candidates);
-			}
-			else
-			{
-				poly = null;
-				if (inst.collision_poly && !inst.collision_poly.is_empty())
-				{
-					inst.collision_poly.cache_poly(inst.width, inst.height, inst.angle);
-					poly = inst.collision_poly;
-				}
-				else
-				{
-					temp_poly.set_from_quad(inst.bquad, inst.x, inst.y, inst.width, inst.height);
-					poly = temp_poly;
-				}
-				this.calcShadow(poly, inst.x, inst.y, h, cr.xor(inst.width < 0, inst.height < 0));
-				ctx.beginPath();
-				ctx.moveTo(umbra_pts[0], umbra_pts[1]);
-				for (j = 2, lenj = umbra_pts.length; j < lenj; j += 2)
-				{
-					ctx.lineTo(umbra_pts[j], umbra_pts[j + 1]);
-				}
-				ctx.closePath();
-				ctx.fill();
-				cr.clearArray(back_faces1);
-				cr.clearArray(umbra_pts);
-			}
-		}
-		ctx.restore();
-		cr.clearArray(casters);
-	};
-	instanceProto.getPolyPoints = function (poly, instx, insty, flipped)
-	{
-		poly_len = poly.pts_count;
-		cr.clearArray(poly_pts);
-		var x, y;
-		var pts = poly.pts_cache;
-		midx = 0;
-		midy = 0;
-		var i, i2;
-		for (i = 0; i < poly_len; ++i)
-		{
-			i2 = i * 2;
-			x = pts[i2] + instx;
-			y = pts[i2+1] + insty;
-			if (flipped)
-			{
-				poly_pts.unshift(y);
-				poly_pts.unshift(x);
-			}
-			else
-			{
-				poly_pts.push(x);
-				poly_pts.push(y);
-			}
-			midx += x;
-			midy += y;
-		}
-		midx /= poly_len;
-		midy /= poly_len;
-	};
-	instanceProto.calcShadow = function (poly, instx, insty, h, flipped)
-	{
-		this.getPolyPoints(poly, instx, insty, flipped);
-		var i, i2;
-		var polyx, polyy;
-		cr.clearArray(back_faces1);
-		cr.clearArray(back_faces2);
-		cr.clearArray(umbra_pts);
-		cw_edge1 = -1;
-		acw_edge1 = -1;
-		cw_edge2 = -1;
-		acw_edge2 = -1;
-		var Lx = this.lightX;
-		var Ly = this.lightY;
-		if (this.lightRadius > 0)
-		{
-			this.calcBackFaces(-this.lightRadius);
-			findEdges();
-			cr.shallowAssignArray(back_faces2, back_faces1);
-			cw_edge2 = cw_edge1;
-			acw_edge2 = acw_edge1;
-			cr.clearArray(back_faces1);
-			cw_edge1 = -1;
-			acw_edge1 = -1;
-			this.calcBackFaces(this.lightRadius);
-			findEdges();
-			if (cw_edge1 === -1 || acw_edge1 === -1 || cw_edge2 === -1 || acw_edge2 === -1)
-				return;
-			this.calcUmbraWithRadius(h);
-		}
-		else
-		{
-			this.calcBackFaces(0);
-			findEdges();
-			for (i = 0; i < poly_len; ++i)
-			{
-				i2 = i*2;
-				polyx = poly_pts[i2];
-				polyy = poly_pts[i2+1];
-				this.calcShadowSegment(i, Lx, Ly, polyx, polyy, h);
-			}
-		}
-	};
-	instanceProto.calcShadowSegment = function (i, Lx, Ly, px, py, h)
-	{
-		var ap, dp, e, x, y, Lx, Ly;
-		var isBackFace = back_faces1[i];
-		var lastBackFace = back_faces1[wrapBackFace(i - 1)];
-		var isClockwiseEdge = (i === cw_edge1);
-		var isAnticlockwiseEdge = (i === acw_edge1);
-		if (isBackFace || lastBackFace)
-		{
-			ap = cr.angleTo(Lx, Ly, px, py);
-			dp = cr.distanceTo(Lx, Ly, px, py);
-			e = this.calculateExtrusion(Lx, Ly, px, py, h);
-			x = Lx + Math.cos(ap) * (dp + e);
-			y = Ly + Math.sin(ap) * (dp + e);
-		}
-		else
-		{
-			x = px;
-			y = py;
-		}
-		if (isAnticlockwiseEdge)
-		{
-			umbra_pts.push(px);
-			umbra_pts.push(py);
-		}
-		umbra_pts.push(x);
-		umbra_pts.push(y);
-		if (isClockwiseEdge)
-		{
-			umbra_pts.push(px);
-			umbra_pts.push(py);
-		}
-	};
-	function isBackFace(Lx, Ly, px, py, qx, qy)
-	{
-		var n = cr.angleTo(px, py, qx, qy) - Math.PI / 2;
-		var a = cr.angleTo(px, py, Lx, Ly);
-		return (cr.angleDiff(a, n) >= Math.PI / 2);
-	};
-	function wrapBackFace(index)
-	{
-		index %= back_faces1.length;
-		if (index < 0)
-			index += back_faces1.length;
-		return index;
-	};
-	instanceProto.calcBackFaces = function (r)
-	{
-		var OLx = this.lightX;
-		var OLy = this.lightY;
-		var Lx = OLx;
-		var Ly = OLy;
-		var i, i2, imod, polyx, polyy, nextx, nexty, a;
-		for (i = 0; i < poly_len; ++i)
-		{
-			i2 = i*2;
-			imod = i+1;
-			imod = (imod === poly_len ? 0 : imod * 2);
-			polyx = poly_pts[i2];
-			polyy = poly_pts[i2+1];
-			nextx = poly_pts[imod];
-			nexty = poly_pts[imod+1];
-			if (r !== 0)
-			{
-				a = cr.angleTo(OLx, OLy, midx, midy) - Math.PI / 2;
-				Lx = OLx + Math.cos(a) * r;
-				Ly = OLy + Math.sin(a) * r;
-			}
-			back_faces1.push(isBackFace(Lx, Ly, polyx, polyy, nextx, nexty));
-		}
-	};
-	function findEdges()
-	{
-		var i, len, isBackFace, lastBackFace;
-		for (i = 0, len = back_faces1.length; i < len; ++i)
-		{
-			isBackFace = back_faces1[i];
-			lastBackFace = back_faces1[wrapBackFace(i - 1)];
-			if (lastBackFace && !isBackFace)
-				cw_edge1 = i;
-			if (!lastBackFace && isBackFace)
-				acw_edge1 = i;
-		}
-	};
-	var intersect_x = 0;
-	var intersect_y = 0;
-	function segment_intersection_at(p0_x, p0_y, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y)
-	{
-		var s1_x, s1_y, s2_x, s2_y, s, t, div;
-		s1_x = p1_x - p0_x;
-		s1_y = p1_y - p0_y;
-		s2_x = p3_x - p2_x;
-		s2_y = p3_y - p2_y;
-		div = (-s2_x * s1_y + s1_x * s2_y);
-		if (div === 0)
-			return false;
-		s = (-s1_y * (p0_x - p2_x) + s1_x * (p0_y - p2_y)) / div;
-		div = (-s2_x * s1_y + s1_x * s2_y);
-		if (div === 0)
-			return false;
-		t = ( s2_x * (p0_y - p2_y) - s2_y * (p0_x - p2_x)) / div;
-		if (s >= 0 && s <= 1 && t >= 0 && t <= 1)
-		{
-			intersect_x = p0_x + (t * s1_x);
-			intersect_y = p0_y + (t * s1_y);
-			return true;
-		}
-		return false;
-	}
-	instanceProto.calcUmbraWithRadius = function (h)
-	{
-		var i = cw_edge2;
-		var i2, polyx, polyy;
-		for ( ; ; ++i)
-		{
-			i = i % poly_len;
-			i2 = i * 2;
-			polyx = poly_pts[i2];
-			polyy = poly_pts[i2+1];
-			umbra_pts.push(polyx);
-			umbra_pts.push(polyy);
-			if (i === acw_edge1)
-				break;
-		}
-		var r = this.lightRadius;
-		var acw_x = polyx;
-		var acw_y = polyy;
-		var a = cr.angleTo(this.lightX, this.lightY, midx, midy);
-		var L1x = this.lightX + Math.cos(a - Math.PI / 2) * r;
-		var L1y = this.lightY + Math.sin(a - Math.PI / 2) * r;
-		var ap = cr.angleTo(L1x, L1y, acw_x, acw_y);
-		var ad = cr.distanceTo(L1x, L1y, acw_x, acw_y);
-		var u1x = L1x + Math.cos(ap) * (ad + this.max_extrude);
-		var u1y = L1y + Math.sin(ap) * (ad + this.max_extrude);
-		i2 = cw_edge2 * 2;
-		var cw_x = poly_pts[i2];
-		var cw_y = poly_pts[i2+1];
-		a = cr.angleTo(this.lightX, this.lightY, midx, midy);
-		var L2x = this.lightX + Math.cos(a + Math.PI / 2) * r;
-		var L2y = this.lightY + Math.sin(a + Math.PI / 2) * r;
-		ap = cr.angleTo(L2x, L2y, cw_x, cw_y);
-		ad = cr.distanceTo(L2x, L2y, cw_x, cw_y);
-		var u2x = L2x + Math.cos(ap) * (ad + this.max_extrude);
-		var u2y = L2y + Math.sin(ap) * (ad + this.max_extrude);
-		acw_umbra_rootx = acw_x;
-		acw_umbra_rooty = acw_y;
-		cw_umbra_rootx = cw_x;
-		cw_umbra_rooty = cw_y;
-		if (segment_intersection_at(acw_x, acw_y, u1x, u1y, cw_x, cw_y, u2x, u2y))
-		{
-			umbra_pts.push(intersect_x);
-			umbra_pts.push(intersect_y);
-			acw_umbra_projx = intersect_x;
-			acw_umbra_projy = intersect_y;
-			cw_umbra_projx = intersect_x;
-			cw_umbra_projy = intersect_y;
-		}
-		else
-		{
-			umbra_pts.push(u1x);
-			umbra_pts.push(u1y);
-			umbra_pts.push(u2x);
-			umbra_pts.push(u2y);
-			acw_umbra_projx = u1x;
-			acw_umbra_projy = u1y;
-			cw_umbra_projx = u2x;
-			cw_umbra_projy = u2y;
-		}
-	};
-	instanceProto.calculateExtrusion = function (Lx, Ly, x, y, h)
-	{
-		if (h >= this.lightZ)
-			return this.max_extrude;
-		if (h <= 0)
-			return 0;
-		var dist = cr.distanceTo(Lx, Ly, x, y);
-		var a = Math.atan(dist / (this.lightZ - h));
-		var e = h * Math.tan(a);
-		if (e >= this.max_extrude)
-			e = this.max_extrude;
-		if (e < 0)
-			e = 0;
-		return e;
-	};
-	instanceProto.drawGL = function (glw)
-	{
-		glw.setOpacity(this.opacity);
-		this.getShadowCasterCandidates();
-		var i, len, j, lenj, inst, h, poly, tmx, tmy, c, tilerc, offx, offy;
-		for (i = 0, len = casters.length; i < len; ++i)
-		{
-			inst = casters[i];
-			if (!inst.extra["shadowcasterEnabled"] || !this.castsFrom(inst.extra["shadowcasterTag"]))
-				continue;
-			inst.update_bbox();
-			h = inst.extra["shadowcasterHeight"];
-			if (inst.tilemap_exists)
-			{
-				inst.getCollisionRectCandidates(this.bbox, collrect_candidates);
-				tmx = inst.x;
-				tmy = inst.y;
-				for (j = 0, lenj = collrect_candidates.length; j < lenj; ++j)
-				{
-					c = collrect_candidates[j];
-					tilerc = c.rc;
-					poly = null;
-					if (c.poly)
-					{
-						poly = c.poly;
-						offx = tilerc.left;
-						offy = tilerc.top;
-					}
-					else
-					{
-						temp_poly.set_from_rect(tilerc, 0, 0);
-						poly = temp_poly;
-						offx = 0;
-						offy = 0;
-					}
-					this.calcShadow(poly, tmx + offx, tmy + offy, h, false);
-					if (umbra_pts.length < 6)
-						continue;		// could not get at least an umbra triangle
-					glw.setTexture(this.webGL_texture);
-					glw.convexPoly(umbra_pts);
-					if (cw_edge1 > -1 && cw_edge2 > -1)
-					{
-						glw.setTexture(this.penumbra_texture);
-						this.drawPenumbraGL(glw, true);
-					}
-					if (acw_edge1 > -1 && acw_edge2 > -1)
-					{
-						glw.setTexture(this.penumbra_texture);
-						this.drawPenumbraGL(glw, false);
-					}
-					cr.clearArray(back_faces1);
-					cr.clearArray(umbra_pts);
-				}
-				cr.clearArray(collrect_candidates);
-			}
-			else
-			{
-				poly = null;
-				if (inst.collision_poly && !inst.collision_poly.is_empty())
-				{
-					inst.collision_poly.cache_poly(inst.width, inst.height, inst.angle);
-					poly = inst.collision_poly;
-				}
-				else
-				{
-					temp_poly.set_from_quad(inst.bquad, inst.x, inst.y, inst.width, inst.height);
-					poly = temp_poly;
-				}
-				this.calcShadow(poly, inst.x, inst.y, h, cr.xor(inst.width < 0, inst.height < 0));
-				if (umbra_pts.length < 6)
-					continue;		// could not get at least an umbra triangle
-				glw.setTexture(this.webGL_texture);
-				glw.convexPoly(umbra_pts);
-				if (cw_edge1 > -1 && cw_edge2 > -1)
-				{
-					glw.setTexture(this.penumbra_texture);
-					this.drawPenumbraGL(glw, true);
-				}
-				if (acw_edge1 > -1 && acw_edge2 > -1)
-				{
-					glw.setTexture(this.penumbra_texture);
-					this.drawPenumbraGL(glw, false);
-				}
-				cr.clearArray(back_faces1);
-				cr.clearArray(umbra_pts);
-			}
-		}
-		cr.clearArray(casters);
-	};
-	instanceProto.drawPenumbraGL = function (glw, clockwise)
-	{
-		var Lx = this.lightX;
-		var Ly = this.lightY;
-		var secx, secy;
-		var rootx, rooty, innerx, innery;
-		if (clockwise)
-		{
-			rootx = cw_umbra_rootx;
-			rooty = cw_umbra_rooty;
-			innerx = cw_umbra_projx;
-			innery = cw_umbra_projy;
-		}
-		else
-		{
-			rootx = acw_umbra_rootx;
-			rooty = acw_umbra_rooty;
-			innerx = acw_umbra_projx;
-			innery = acw_umbra_projy;
-		}
-		var r = this.lightRadius;
-		var a = cr.angleTo(Lx, Ly, midx, midy);
-		var oa = Math.PI / 2;
-		if (clockwise)
-			oa = -oa;
-		Lx += Math.cos(a + oa) * r;
-		Ly += Math.sin(a + oa) * r;
-		var twopart = false;
-		if (clockwise)
-		{
-			twopart = (cw_edge1 !== cw_edge2);
-			if (twopart)
-			{
-				secx = poly_pts[cw_edge1*2];
-				secy = poly_pts[cw_edge1*2+1];
-			}
-		}
-		else
-		{
-			twopart = (acw_edge1 !== acw_edge2);
-			if (twopart)
-			{
-				secx = poly_pts[acw_edge2*2];
-				secy = poly_pts[acw_edge2*2+1];
-			}
-		}
-		if (twopart)
-		{
-			a = cr.angleTo(secx, secy, rootx, rooty);
-		}
-		else
-		{
-			a = cr.angleTo(Lx, Ly, rootx, rooty);
-		}
-		var Ux = rootx + Math.cos(a) * this.max_extrude;
-		var Uy = rooty + Math.sin(a) * this.max_extrude;
-		var U2x, U2y, a3, a2, a1;
-		var umbra_factor = 0;
-		var rootu = 0;
-		var rootv = 1;
-		if (twopart)
-		{
-			a3 = cr.angleTo(Lx, Ly, secx, secy);
-			var U2x = secx + Math.cos(a3) * this.max_extrude;
-			var U2y = secy + Math.sin(a3) * this.max_extrude;
-			a2 = a;		// angle of middle edge
-			a1 = cr.angleTo(rootx, rooty, innerx, innery);
-			umbra_factor = (cr.angleDiff(a2, a3) / cr.angleDiff(a1, a3));
-			var side_dist = cr.distanceTo(secx, secy, rootx, rooty);
-			var inner_root_factor = (side_dist / (side_dist + this.max_extrude));
-			var sega = cr.angleTo(0, 1, umbra_factor, 0);
-			var segd = cr.distanceTo(0, 1, umbra_factor, 0);
-			rootu += Math.cos(sega) * inner_root_factor * segd;
-			rootv += Math.sin(sega) * inner_root_factor * segd;
-		}
-		glw.quadTexUV(rootx, rooty, innerx, innery, Ux, Uy, Ux, Uy, rootu, rootv, 1, 0, umbra_factor, 0, umbra_factor, 0);
-		if (twopart)
-		{
-			glw.quadTexUV(secx, secy, Ux, Uy, U2x, U2y, U2x, U2y, 0, 1, umbra_factor, 0, 0, 0, 0, 0);
-		}
-	};
-	function maybeGetPenumbraData()
-	{
-		if (penumbra_data)
-			return;		// already got data
-		var w = penumbra_img.width;
-		var h = penumbra_img.height;
-		var canvas = document.createElement("canvas");
-		canvas.width = w;
-		canvas.height = h;
-		var ctx = canvas.getContext("2d");
-		ctx.clearRect(0, 0, w, h);
-		ctx.drawImage(penumbra_img, 0, 0, w, h);
-		penumbra_data = ctx.getImageData(0, 0, w, h).data;
-	};
-	instanceProto.createTextures = function ()
-	{
-		if (!this.runtime.glwrap)
-			return;		// not WebGL mode
-		if (this.webGL_texture)
-		{
-			this.runtime.glwrap.deleteTexture(this.webGL_texture);
-			this.webGL_texture = null;
-		}
-		if (this.penumbra_texture)
-		{
-			this.runtime.glwrap.deleteTexture(this.penumbra_texture);
-			this.penumbra_texture = null;
-		}
-		this.createFillTexture();
-		this.createPenumbraTexture();
-	};
-	instanceProto.createFillTexture = function ()
-	{
-		var canvas = document.createElement("canvas");
-		canvas.width = 16;
-		canvas.height = 16;
-		var ctx = canvas.getContext("2d");
-		ctx.fillStyle = "rgb(" + this.lightR + "," + this.lightG + "," + this.lightB + ")";
-		ctx.fillRect(0, 0, 16, 16);
-		this.webGL_texture = this.runtime.glwrap.createEmptyTexture(16, 16, false, false, true);
-		this.runtime.glwrap.videoToTexture(canvas, this.webGL_texture);
-	};
-	instanceProto.createPenumbraTexture = function ()
-	{
-		var w = penumbra_img.width;
-		var h = penumbra_img.height;
-		var r = this.lightR, g = this.lightG, b = this.lightB;
-		var src_data = penumbra_data;
-		var canvas = document.createElement("canvas");
-		canvas.width = w;
-		canvas.height = h;
-		var ctx = canvas.getContext("2d");
-		var imgdata = ctx.createImageData(w, h);
-		var arr = imgdata.data;
-		var i, len;
-		for (i = 0, len = arr.length; i < len; i += 4)
-		{
-			arr[i] = r;
-			arr[i+1] = g;
-			arr[i+2] = b;
-			arr[i+3] = src_data[i+3];		// copy alpha from original
-		}
-		ctx.putImageData(imgdata, 0, 0);
-		this.penumbra_texture = this.runtime.glwrap.createEmptyTexture(w, h, this.runtime.linearSampling, false, false);
-		this.runtime.glwrap.videoToTexture(canvas, this.penumbra_texture);
-	};
-	function Cnds() {};
-	/*
-	Cnds.prototype.MyCondition = function (myparam)
-	{
-		return myparam >= 0;
-	};
-	*/
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetLightHeight = function (z)
-	{
-		if (this.lightZ !== z)
-		{
-			this.lightZ = z;
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.SetLightColor = function (rgb)
-	{
-		var r = cr.GetRValue(rgb);
-		var g = cr.GetGValue(rgb);
-		var b = cr.GetBValue(rgb);
-		if (this.lightR !== r || this.lightG !== g || this.lightB !== b)
-		{
-			this.lightR = r;
-			this.lightG = g;
-			this.lightB = b;
-			this.createTextures();
-			this.runtime.redraw = true;
-		}
-	};
-	Acts.prototype.SetTag = function (tag_)
-	{
-		if (this.tag !== tag_)
-		{
-			this.tag = tag_;
-			this.runtime.redraw = true;
-		}
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.LightX = function (ret)
-	{
-		ret.set_float(this.lightX);
-	};
-	Exps.prototype.LightY = function (ret)
-	{
-		ret.set_float(this.lightY);
-	};
-	Exps.prototype.Tag = function (ret)
-	{
-		ret.set_string(this.tag);
-	};
-	pluginProto.exps = new Exps();
-}());
-;
-;
 cr.plugins_.sirg_notifications = function(runtime)
 {
 	this.runtime = runtime;
@@ -27529,274 +20094,6 @@ cr.plugins_.sirg_notifications = function(runtime)
 	}
 	pluginProto.acts = new Acts();
 	function Exps() {};
-	pluginProto.exps = new Exps();
-}());
-;
-;
-cr.plugins_.sliderbar = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var pluginProto = cr.plugins_.sliderbar.prototype;
-	pluginProto.Type = function(plugin)
-	{
-		this.plugin = plugin;
-		this.runtime = plugin.runtime;
-	};
-	var typeProto = pluginProto.Type.prototype;
-	typeProto.onCreate = function()
-	{
-	};
-	pluginProto.Instance = function(type)
-	{
-		this.type = type;
-		this.runtime = type.runtime;
-	};
-	var instanceProto = pluginProto.Instance.prototype;
-	instanceProto.onCreate = function()
-	{
-		if (this.runtime.isDomFree)
-		{
-			cr.logexport("[Construct 2] Slider Bar plugin not supported on this platform - the object will not be created");
-			return;
-		}
-		this.elem = document.createElement("input");
-		this.elem.type = "range";
-		this.elem["max"] = this.properties[2];
-		this.elem["min"] = this.properties[1];
-		this.elem["step"] = this.properties[3];
-		this.elem["value"] = this.properties[0];
-		this.elem.disabled = (this.properties[6] === 0);
-		this.elem.id = this.properties[7];
-		this.elem.title = this.properties[4];
-		jQuery(this.elem).appendTo(this.runtime.canvasdiv ? this.runtime.canvasdiv : "body");
-		this.element_hidden = false;
-		if (this.properties[5] === 0)
-		{
-			jQuery(this.elem).hide();
-			this.visible = false;
-			this.element_hidden = true;
-		}
-		this.elem.onclick = (function (self) {
-			return function(e) {
-				e.stopPropagation();
-				self.runtime.isInUserInputEvent = true;
-				self.runtime.trigger(cr.plugins_.sliderbar.prototype.cnds.OnClicked, self);
-				self.runtime.isInUserInputEvent = false;
-			};
-		})(this);
-		this.elem.onchange = (function (self) {
-			return function(e) {
-				self.runtime.isInUserInputEvent = true;
-				self.runtime.trigger(cr.plugins_.sliderbar.prototype.cnds.OnChanged, self);
-				self.runtime.isInUserInputEvent = false;
-			};
-		})(this);
-		this.elem.addEventListener("touchstart", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchmove", function (e) {
-			e.stopPropagation();
-		}, false);
-		this.elem.addEventListener("touchend", function (e) {
-			e.stopPropagation();
-		}, false);
-		jQuery(this.elem).mousedown(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).mouseup(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).keydown(function (e) {
-			e.stopPropagation();
-		});
-		jQuery(this.elem).keyup(function (e) {
-			e.stopPropagation();
-		});
-		this.lastLeft = 0;
-		this.lastTop = 0;
-		this.lastRight = 0;
-		this.lastBottom = 0;
-		this.lastWinWidth = 0;
-		this.lastWinHeight = 0;
-		this.updatePosition(true);
-		this.runtime.tickMe(this);
-	};
-	instanceProto.saveToJSON = function ()
-	{
-		var o = {
-			"v": this.elem["value"],
-			"mi": this.elem["min"],
-			"ma": this.elem["max"],
-			"s": this.elem["step"]
-		};
-		return o;
-	};
-	instanceProto.loadFromJSON = function (o)
-	{
-		this.elem["min"] = o["mi"];
-		this.elem["max"] = o["ma"];
-		this.elem["step"] = o["s"];
-		this.elem["value"] = o["v"];
-	};
-	instanceProto.onDestroy = function ()
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).remove();
-		this.elem = null;
-	};
-	instanceProto.tick = function ()
-	{
-		this.updatePosition();
-	};
-	var last_canvas_offset = null;
-	var last_checked_tick = -1;
-	instanceProto.updatePosition = function (first)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		var left = this.layer.layerToCanvas(this.x, this.y, true);
-		var top = this.layer.layerToCanvas(this.x, this.y, false);
-		var right = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, true);
-		var bottom = this.layer.layerToCanvas(this.x + this.width, this.y + this.height, false);
-		var rightEdge = this.runtime.width / this.runtime.devicePixelRatio;
-		var bottomEdge = this.runtime.height / this.runtime.devicePixelRatio;
-		if (!this.visible || !this.layer.visible || right <= 0 || bottom <= 0 || left >= rightEdge || top >= bottomEdge)
-		{
-			if (!this.element_hidden)
-				jQuery(this.elem).hide();
-			this.element_hidden = true;
-			return;
-		}
-		if (left < 1)
-			left = 1;
-		if (top < 1)
-			top = 1;
-		if (right >= rightEdge)
-			right = rightEdge - 1;
-		if (bottom >= bottomEdge)
-			bottom = bottomEdge - 1;
-		var curWinWidth = window.innerWidth;
-		var curWinHeight = window.innerHeight;
-		if (!first && this.lastLeft === left && this.lastTop === top && this.lastRight === right && this.lastBottom === bottom && this.lastWinWidth === curWinWidth && this.lastWinHeight === curWinHeight)
-		{
-			if (this.element_hidden)
-			{
-				jQuery(this.elem).show();
-				this.element_hidden = false;
-			}
-			return;
-		}
-		this.lastLeft = left;
-		this.lastTop = top;
-		this.lastRight = right;
-		this.lastBottom = bottom;
-		this.lastWinWidth = curWinWidth;
-		this.lastWinHeight = curWinHeight;
-		if (this.element_hidden)
-		{
-			jQuery(this.elem).show();
-			this.element_hidden = false;
-		}
-		var offx = Math.round(left) + jQuery(this.runtime.canvas).offset().left;
-		var offy = Math.round(top) + jQuery(this.runtime.canvas).offset().top;
-		jQuery(this.elem).css("position", "absolute");
-		jQuery(this.elem).offset({left: offx, top: offy});
-		jQuery(this.elem).width(Math.round(right - left));
-		jQuery(this.elem).height(Math.round(bottom - top));
-	};
-	instanceProto.draw = function(ctx)
-	{
-	};
-	instanceProto.drawGL = function(glw)
-	{
-	};
-	function Cnds() {};
-	Cnds.prototype.OnClicked = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnChanged = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.CompareValue = function (cmp, x)
-	{
-		if (this.isDomFree)
-			return false;
-		return cr.do_cmp(parseFloat(this.elem["value"]), cmp, x);
-	};
-	pluginProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetTooltip = function (text)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.title = text;
-	};
-	Acts.prototype.SetVisible = function (vis)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.visible = (vis !== 0);
-	};
-	Acts.prototype.SetCSSStyle = function (p, v)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		jQuery(this.elem).css(p, v);
-	};
-	Acts.prototype.SetValue = function (x)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem["value"] = x;
-	};
-	Acts.prototype.SetMaximum = function (x)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem["max"] = x;
-	};
-	Acts.prototype.SetMinimum = function (x)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem["min"] = x;
-	};
-	Acts.prototype.SetStep = function (x)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem["step"] = x;
-	};
-	Acts.prototype.SetEnabled = function (en)
-	{
-		if (this.runtime.isDomFree)
-			return;
-		this.elem.disabled = (en === 0);
-	};
-	pluginProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.Value = function (ret)
-	{
-		ret.set_float(this.runtime.isDomFree ? 0 : (parseFloat(this.elem["value"]) || 0));
-	};
-	Exps.prototype.Maximum = function (ret)
-	{
-		ret.set_float(this.runtime.isDomFree ? 0 : (parseFloat(this.elem["max"]) || 0));
-	};
-	Exps.prototype.Minimum = function (ret)
-	{
-		ret.set_float(this.runtime.isDomFree ? 0 : (parseFloat(this.elem["min"]) || 0));
-	};
-	Exps.prototype.Step = function (ret)
-	{
-		ret.set_float(this.runtime.isDomFree ? 0 : (parseFloat(this.elem["step"]) || 0));
-	};
 	pluginProto.exps = new Exps();
 }());
 ;
@@ -28785,505 +21082,6 @@ cr.behaviors.EightDir = function(runtime)
 }());
 ;
 ;
-cr.behaviors.Fade = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var behaviorProto = cr.behaviors.Fade.prototype;
-	behaviorProto.Type = function(behavior, objtype)
-	{
-		this.behavior = behavior;
-		this.objtype = objtype;
-		this.runtime = behavior.runtime;
-	};
-	var behtypeProto = behaviorProto.Type.prototype;
-	behtypeProto.onCreate = function()
-	{
-	};
-	behaviorProto.Instance = function(type, inst)
-	{
-		this.type = type;
-		this.behavior = type.behavior;
-		this.inst = inst;				// associated object instance to modify
-		this.runtime = type.runtime;
-	};
-	var behinstProto = behaviorProto.Instance.prototype;
-	behinstProto.onCreate = function()
-	{
-		this.activeAtStart = this.properties[0] === 1;
-		this.setMaxOpacity = false;					// used to retrieve maxOpacity once in first 'Start fade' action if initially inactive
-		this.fadeInTime = this.properties[1];
-		this.waitTime = this.properties[2];
-		this.fadeOutTime = this.properties[3];
-		this.destroy = this.properties[4];			// 0 = no, 1 = after fade out
-		this.stage = this.activeAtStart ? 0 : 3;		// 0 = fade in, 1 = wait, 2 = fade out, 3 = done
-		if (this.recycled)
-			this.stageTime.reset();
-		else
-			this.stageTime = new cr.KahanAdder();
-		this.maxOpacity = (this.inst.opacity ? this.inst.opacity : 1.0);
-		if (this.activeAtStart)
-		{
-			if (this.fadeInTime === 0)
-			{
-				this.stage = 1;
-				if (this.waitTime === 0)
-					this.stage = 2;
-			}
-			else
-			{
-				this.inst.opacity = 0;
-				this.runtime.redraw = true;
-			}
-		}
-	};
-	behinstProto.saveToJSON = function ()
-	{
-		return {
-			"fit": this.fadeInTime,
-			"wt": this.waitTime,
-			"fot": this.fadeOutTime,
-			"s": this.stage,
-			"st": this.stageTime.sum,
-			"mo": this.maxOpacity,
-		};
-	};
-	behinstProto.loadFromJSON = function (o)
-	{
-		this.fadeInTime = o["fit"];
-		this.waitTime = o["wt"];
-		this.fadeOutTime = o["fot"];
-		this.stage = o["s"];
-		this.stageTime.reset();
-		this.stageTime.sum = o["st"];
-		this.maxOpacity = o["mo"];
-	};
-	behinstProto.tick = function ()
-	{
-		this.stageTime.add(this.runtime.getDt(this.inst));
-		if (this.stage === 0)
-		{
-			this.inst.opacity = (this.stageTime.sum / this.fadeInTime) * this.maxOpacity;
-			this.runtime.redraw = true;
-			if (this.inst.opacity >= this.maxOpacity)
-			{
-				this.inst.opacity = this.maxOpacity;
-				this.stage = 1;	// wait stage
-				this.stageTime.reset();
-				this.runtime.trigger(cr.behaviors.Fade.prototype.cnds.OnFadeInEnd, this.inst);
-			}
-		}
-		if (this.stage === 1)
-		{
-			if (this.stageTime.sum >= this.waitTime)
-			{
-				this.stage = 2;	// fade out stage
-				this.stageTime.reset();
-				this.runtime.trigger(cr.behaviors.Fade.prototype.cnds.OnWaitEnd, this.inst);
-			}
-		}
-		if (this.stage === 2)
-		{
-			if (this.fadeOutTime !== 0)
-			{
-				this.inst.opacity = this.maxOpacity - ((this.stageTime.sum / this.fadeOutTime) * this.maxOpacity);
-				this.runtime.redraw = true;
-				if (this.inst.opacity < 0)
-				{
-					this.inst.opacity = 0;
-					this.stage = 3;	// done
-					this.stageTime.reset();
-					this.runtime.trigger(cr.behaviors.Fade.prototype.cnds.OnFadeOutEnd, this.inst);
-					if (this.destroy === 1)
-						this.runtime.DestroyInstance(this.inst);
-				}
-			}
-		}
-	};
-	behinstProto.doStart = function ()
-	{
-		this.stage = 0;
-		this.stageTime.reset();
-		if (this.fadeInTime === 0)
-		{
-			this.stage = 1;
-			if (this.waitTime === 0)
-				this.stage = 2;
-		}
-		else
-		{
-			this.inst.opacity = 0;
-			this.runtime.redraw = true;
-		}
-	};
-	function Cnds() {};
-	Cnds.prototype.OnFadeOutEnd = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnFadeInEnd = function ()
-	{
-		return true;
-	};
-	Cnds.prototype.OnWaitEnd = function ()
-	{
-		return true;
-	};
-	behaviorProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.StartFade = function ()
-	{
-		if (!this.activeAtStart && !this.setMaxOpacity)
-		{
-			this.maxOpacity = (this.inst.opacity ? this.inst.opacity : 1.0);
-			this.setMaxOpacity = true;
-		}
-		if (this.stage === 3)
-			this.doStart();
-	};
-	Acts.prototype.RestartFade = function ()
-	{
-		this.doStart();
-	};
-	Acts.prototype.SetFadeInTime = function (t)
-	{
-		if (t < 0)
-			t = 0;
-		this.fadeInTime = t;
-	};
-	Acts.prototype.SetWaitTime = function (t)
-	{
-		if (t < 0)
-			t = 0;
-		this.waitTime = t;
-	};
-	Acts.prototype.SetFadeOutTime = function (t)
-	{
-		if (t < 0)
-			t = 0;
-		this.fadeOutTime = t;
-	};
-	behaviorProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.FadeInTime = function (ret)
-	{
-		ret.set_float(this.fadeInTime);
-	};
-	Exps.prototype.WaitTime = function (ret)
-	{
-		ret.set_float(this.waitTime);
-	};
-	Exps.prototype.FadeOutTime = function (ret)
-	{
-		ret.set_float(this.fadeOutTime);
-	};
-	behaviorProto.exps = new Exps();
-}());
-;
-;
-cr.behaviors.Sin = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var behaviorProto = cr.behaviors.Sin.prototype;
-	behaviorProto.Type = function(behavior, objtype)
-	{
-		this.behavior = behavior;
-		this.objtype = objtype;
-		this.runtime = behavior.runtime;
-	};
-	var behtypeProto = behaviorProto.Type.prototype;
-	behtypeProto.onCreate = function()
-	{
-	};
-	behaviorProto.Instance = function(type, inst)
-	{
-		this.type = type;
-		this.behavior = type.behavior;
-		this.inst = inst;				// associated object instance to modify
-		this.runtime = type.runtime;
-		this.i = 0;		// period offset (radians)
-	};
-	var behinstProto = behaviorProto.Instance.prototype;
-	var _2pi = 2 * Math.PI;
-	var _pi_2 = Math.PI / 2;
-	var _3pi_2 = (3 * Math.PI) / 2;
-	behinstProto.onCreate = function()
-	{
-		this.active = (this.properties[0] === 1);
-		this.movement = this.properties[1]; // 0=Horizontal|1=Vertical|2=Size|3=Width|4=Height|5=Angle|6=Opacity|7=Value only
-		this.wave = this.properties[2];		// 0=Sine|1=Triangle|2=Sawtooth|3=Reverse sawtooth|4=Square
-		this.period = this.properties[3];
-		this.period += Math.random() * this.properties[4];								// period random
-		if (this.period === 0)
-			this.i = 0;
-		else
-		{
-			this.i = (this.properties[5] / this.period) * _2pi;								// period offset
-			this.i += ((Math.random() * this.properties[6]) / this.period) * _2pi;			// period offset random
-		}
-		this.mag = this.properties[7];													// magnitude
-		this.mag += Math.random() * this.properties[8];									// magnitude random
-		this.initialValue = 0;
-		this.initialValue2 = 0;
-		this.ratio = 0;
-		this.init();
-	};
-	behinstProto.saveToJSON = function ()
-	{
-		return {
-			"i": this.i,
-			"a": this.active,
-			"mv": this.movement,
-			"w": this.wave,
-			"p": this.period,
-			"mag": this.mag,
-			"iv": this.initialValue,
-			"iv2": this.initialValue2,
-			"r": this.ratio,
-			"lkv": this.lastKnownValue,
-			"lkv2": this.lastKnownValue2
-		};
-	};
-	behinstProto.loadFromJSON = function (o)
-	{
-		this.i = o["i"];
-		this.active = o["a"];
-		this.movement = o["mv"];
-		this.wave = o["w"];
-		this.period = o["p"];
-		this.mag = o["mag"];
-		this.initialValue = o["iv"];
-		this.initialValue2 = o["iv2"] || 0;
-		this.ratio = o["r"];
-		this.lastKnownValue = o["lkv"];
-		this.lastKnownValue2 = o["lkv2"] || 0;
-	};
-	behinstProto.init = function ()
-	{
-		switch (this.movement) {
-		case 0:		// horizontal
-			this.initialValue = this.inst.x;
-			break;
-		case 1:		// vertical
-			this.initialValue = this.inst.y;
-			break;
-		case 2:		// size
-			this.initialValue = this.inst.width;
-			this.ratio = this.inst.height / this.inst.width;
-			break;
-		case 3:		// width
-			this.initialValue = this.inst.width;
-			break;
-		case 4:		// height
-			this.initialValue = this.inst.height;
-			break;
-		case 5:		// angle
-			this.initialValue = this.inst.angle;
-			this.mag = cr.to_radians(this.mag);		// convert magnitude from degrees to radians
-			break;
-		case 6:		// opacity
-			this.initialValue = this.inst.opacity;
-			break;
-		case 7:
-			this.initialValue = 0;
-			break;
-		case 8:		// forwards/backwards
-			this.initialValue = this.inst.x;
-			this.initialValue2 = this.inst.y;
-			break;
-		default:
-;
-		}
-		this.lastKnownValue = this.initialValue;
-		this.lastKnownValue2 = this.initialValue2;
-	};
-	behinstProto.waveFunc = function (x)
-	{
-		x = x % _2pi;
-		switch (this.wave) {
-		case 0:		// sine
-			return Math.sin(x);
-		case 1:		// triangle
-			if (x <= _pi_2)
-				return x / _pi_2;
-			else if (x <= _3pi_2)
-				return 1 - (2 * (x - _pi_2) / Math.PI);
-			else
-				return (x - _3pi_2) / _pi_2 - 1;
-		case 2:		// sawtooth
-			return 2 * x / _2pi - 1;
-		case 3:		// reverse sawtooth
-			return -2 * x / _2pi + 1;
-		case 4:		// square
-			return x < Math.PI ? -1 : 1;
-		};
-		return 0;
-	};
-	behinstProto.tick = function ()
-	{
-		var dt = this.runtime.getDt(this.inst);
-		if (!this.active || dt === 0)
-			return;
-		if (this.period === 0)
-			this.i = 0;
-		else
-		{
-			this.i += (dt / this.period) * _2pi;
-			this.i = this.i % _2pi;
-		}
-		switch (this.movement) {
-		case 0:		// horizontal
-			if (this.inst.x !== this.lastKnownValue)
-				this.initialValue += this.inst.x - this.lastKnownValue;
-			this.inst.x = this.initialValue + this.waveFunc(this.i) * this.mag;
-			this.lastKnownValue = this.inst.x;
-			break;
-		case 1:		// vertical
-			if (this.inst.y !== this.lastKnownValue)
-				this.initialValue += this.inst.y - this.lastKnownValue;
-			this.inst.y = this.initialValue + this.waveFunc(this.i) * this.mag;
-			this.lastKnownValue = this.inst.y;
-			break;
-		case 2:		// size
-			this.inst.width = this.initialValue + this.waveFunc(this.i) * this.mag;
-			this.inst.height = this.inst.width * this.ratio;
-			break;
-		case 3:		// width
-			this.inst.width = this.initialValue + this.waveFunc(this.i) * this.mag;
-			break;
-		case 4:		// height
-			this.inst.height = this.initialValue + this.waveFunc(this.i) * this.mag;
-			break;
-		case 5:		// angle
-			if (this.inst.angle !== this.lastKnownValue)
-				this.initialValue = cr.clamp_angle(this.initialValue + (this.inst.angle - this.lastKnownValue));
-			this.inst.angle = cr.clamp_angle(this.initialValue + this.waveFunc(this.i) * this.mag);
-			this.lastKnownValue = this.inst.angle;
-			break;
-		case 6:		// opacity
-			this.inst.opacity = this.initialValue + (this.waveFunc(this.i) * this.mag) / 100;
-			if (this.inst.opacity < 0)
-				this.inst.opacity = 0;
-			else if (this.inst.opacity > 1)
-				this.inst.opacity = 1;
-			break;
-		case 8:		// forwards/backwards
-			if (this.inst.x !== this.lastKnownValue)
-				this.initialValue += this.inst.x - this.lastKnownValue;
-			if (this.inst.y !== this.lastKnownValue2)
-				this.initialValue2 += this.inst.y - this.lastKnownValue2;
-			this.inst.x = this.initialValue + Math.cos(this.inst.angle) * this.waveFunc(this.i) * this.mag;
-			this.inst.y = this.initialValue2 + Math.sin(this.inst.angle) * this.waveFunc(this.i) * this.mag;
-			this.lastKnownValue = this.inst.x;
-			this.lastKnownValue2 = this.inst.y;
-			break;
-		}
-		this.inst.set_bbox_changed();
-	};
-	behinstProto.onSpriteFrameChanged = function (prev_frame, next_frame)
-	{
-		switch (this.movement) {
-		case 2:	// size
-			this.initialValue *= (next_frame.width / prev_frame.width);
-			this.ratio = next_frame.height / next_frame.width;
-			break;
-		case 3:	// width
-			this.initialValue *= (next_frame.width / prev_frame.width);
-			break;
-		case 4:	// height
-			this.initialValue *= (next_frame.height / prev_frame.height);
-			break;
-		}
-	};
-	function Cnds() {};
-	Cnds.prototype.IsActive = function ()
-	{
-		return this.active;
-	};
-	Cnds.prototype.CompareMovement = function (m)
-	{
-		return this.movement === m;
-	};
-	Cnds.prototype.ComparePeriod = function (cmp, v)
-	{
-		return cr.do_cmp(this.period, cmp, v);
-	};
-	Cnds.prototype.CompareMagnitude = function (cmp, v)
-	{
-		if (this.movement === 5)
-			return cr.do_cmp(this.mag, cmp, cr.to_radians(v));
-		else
-			return cr.do_cmp(this.mag, cmp, v);
-	};
-	Cnds.prototype.CompareWave = function (w)
-	{
-		return this.wave === w;
-	};
-	behaviorProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetActive = function (a)
-	{
-		this.active = (a === 1);
-	};
-	Acts.prototype.SetPeriod = function (x)
-	{
-		this.period = x;
-	};
-	Acts.prototype.SetMagnitude = function (x)
-	{
-		this.mag = x;
-		if (this.movement === 5)	// angle
-			this.mag = cr.to_radians(this.mag);
-	};
-	Acts.prototype.SetMovement = function (m)
-	{
-		if (this.movement === 5)
-			this.mag = cr.to_degrees(this.mag);
-		this.movement = m;
-		this.init();
-	};
-	Acts.prototype.SetWave = function (w)
-	{
-		this.wave = w;
-	};
-	Acts.prototype.SetPhase = function (x)
-	{
-		this.i = (x * _2pi) % _2pi;
-	};
-	Acts.prototype.UpdateInitialState = function ()
-	{
-		this.init();
-	};
-	behaviorProto.acts = new Acts();
-	function Exps() {};
-	Exps.prototype.CyclePosition = function (ret)
-	{
-		ret.set_float(this.i / _2pi);
-	};
-	Exps.prototype.Period = function (ret)
-	{
-		ret.set_float(this.period);
-	};
-	Exps.prototype.Magnitude = function (ret)
-	{
-		if (this.movement === 5)	// angle
-			ret.set_float(cr.to_degrees(this.mag));
-		else
-			ret.set_float(this.mag);
-	};
-	Exps.prototype.Value = function (ret)
-	{
-		ret.set_float(this.waveFunc(this.i) * this.mag);
-	};
-	behaviorProto.exps = new Exps();
-}());
-;
-;
 cr.behaviors.scrollto = function(runtime)
 {
 	this.runtime = runtime;
@@ -29476,91 +21274,21 @@ cr.behaviors.shadowcaster = function(runtime)
 	};
 	behaviorProto.exps = new Exps();
 }());
-;
-;
-cr.behaviors.solid = function(runtime)
-{
-	this.runtime = runtime;
-};
-(function ()
-{
-	var behaviorProto = cr.behaviors.solid.prototype;
-	behaviorProto.Type = function(behavior, objtype)
-	{
-		this.behavior = behavior;
-		this.objtype = objtype;
-		this.runtime = behavior.runtime;
-	};
-	var behtypeProto = behaviorProto.Type.prototype;
-	behtypeProto.onCreate = function()
-	{
-	};
-	behaviorProto.Instance = function(type, inst)
-	{
-		this.type = type;
-		this.behavior = type.behavior;
-		this.inst = inst;				// associated object instance to modify
-		this.runtime = type.runtime;
-	};
-	var behinstProto = behaviorProto.Instance.prototype;
-	behinstProto.onCreate = function()
-	{
-		this.inst.extra["solidEnabled"] = (this.properties[0] !== 0);
-	};
-	behinstProto.tick = function ()
-	{
-	};
-	function Cnds() {};
-	Cnds.prototype.IsEnabled = function ()
-	{
-		return this.inst.extra["solidEnabled"];
-	};
-	behaviorProto.cnds = new Cnds();
-	function Acts() {};
-	Acts.prototype.SetEnabled = function (e)
-	{
-		this.inst.extra["solidEnabled"] = !!e;
-	};
-	behaviorProto.acts = new Acts();
-}());
 cr.getObjectRefTable = function () { return [
-	cr.plugins_.Audio,
-	cr.plugins_.Browser,
-	cr.plugins_.Button,
-	cr.plugins_.Keyboard,
-	cr.plugins_.gamepad,
-	cr.plugins_.shadowlight,
-	cr.plugins_.Sprite,
-	cr.plugins_.Spritefont2,
-	cr.plugins_.Photon,
-	cr.plugins_.sliderbar,
-	cr.plugins_.Text,
-	cr.plugins_.TextBox,
-	cr.plugins_.TiledBg,
-	cr.plugins_.Tilemap,
+	cr.plugins_.MagiCam,
 	cr.plugins_.Touch,
-	cr.plugins_.progressbar,
+	cr.plugins_.Sprite,
 	cr.plugins_.sirg_notifications,
-	cr.behaviors.Anchor,
-	cr.behaviors.DragnDrop,
-	cr.behaviors.Fade,
-	cr.behaviors.Sin,
-	cr.behaviors.shadowcaster,
-	cr.behaviors.solid,
+	cr.plugins_.Tilemap,
 	cr.behaviors.EightDir,
 	cr.behaviors.scrollto,
-	cr.system_object.prototype.cnds.IsGroupActive,
-	cr.system_object.prototype.cnds.CompareVar,
-	cr.system_object.prototype.acts.SetLayerVisible,
-	cr.plugins_.Sprite.prototype.acts.SetVisible,
-	cr.system_object.prototype.cnds.OnLoadComplete,
-	cr.system_object.prototype.acts.SetVar,
+	cr.behaviors.shadowcaster,
+	cr.behaviors.Anchor,
+	cr.behaviors.DragnDrop,
+	cr.system_object.prototype.cnds.OnLayoutStart,
 	cr.plugins_.sirg_notifications.prototype.acts.AddNotification,
-	cr.system_object.prototype.cnds.OnLoadFailed,
-	cr.system_object.prototype.cnds.OnSaveFailed,
-	cr.plugins_.Button.prototype.cnds.OnClicked,
-	cr.system_object.prototype.acts.SaveState,
-	cr.system_object.prototype.acts.LoadState,
+	cr.plugins_.MagiCam.prototype.acts.FollowObject,
+	cr.system_object.prototype.cnds.IsGroupActive,
 	cr.plugins_.Touch.prototype.cnds.IsTouchingObject,
 	cr.plugins_.Sprite.prototype.cnds.IsOverlapping,
 	cr.plugins_.Sprite.prototype.acts.SetOpacity,
@@ -29572,35 +21300,11 @@ cr.getObjectRefTable = function () { return [
 	cr.plugins_.Sprite.prototype.exps.Y,
 	cr.system_object.prototype.cnds.Else,
 	cr.plugins_.Sprite.prototype.acts.SetPos,
-	cr.plugins_.Touch.prototype.cnds.OnTapGestureObject,
-	cr.plugins_.Text.prototype.acts.SetText,
-	cr.system_object.prototype.acts.Wait,
-	cr.behaviors.EightDir.prototype.acts.SetMaxSpeed,
-	cr.system_object.prototype.cnds.EveryTick,
-	cr.plugins_.Audio.prototype.acts.SetMasterVolume,
-	cr.plugins_.sliderbar.prototype.cnds.CompareValue,
-	cr.system_object.prototype.cnds.Every,
-	cr.plugins_.progressbar.prototype.acts.SetProgress,
-	cr.system_object.prototype.exps.fps,
-	cr.plugins_.Spritefont2.prototype.acts.SetText,
 	cr.behaviors.EightDir.prototype.cnds.IsMoving,
 	cr.plugins_.Sprite.prototype.acts.SetAnim,
 	cr.behaviors.EightDir.prototype.exps.VectorX,
 	cr.plugins_.Sprite.prototype.acts.SetAngle,
 	cr.plugins_.Sprite.prototype.cnds.CompareInstanceVar,
 	cr.plugins_.Sprite.prototype.cnds.IsMirrored,
-	cr.plugins_.Sprite.prototype.acts.SetMirrored,
-	cr.plugins_.Button.prototype.cnds.IsChecked,
-	cr.behaviors.Sin.prototype.acts.SetActive,
-	cr.behaviors.scrollto.prototype.acts.SetEnabled,
-	cr.plugins_.shadowlight.prototype.acts.SetVisible,
-	cr.plugins_.shadowlight.prototype.acts.SetPos,
-	cr.plugins_.Sprite.prototype.acts.MoveToLayer,
-	cr.plugins_.TiledBg.prototype.acts.MoveToLayer,
-	cr.system_object.prototype.cnds.OnLayoutStart,
-	cr.behaviors.Fade.prototype.acts.SetFadeInTime,
-	cr.system_object.prototype.cnds.IsOnPlatform,
-	cr.plugins_.Keyboard.prototype.cnds.IsKeyDown,
-	cr.plugins_.Keyboard.prototype.cnds.OnKey,
-	cr.plugins_.Photon.prototype.acts.disconnect
+	cr.plugins_.Sprite.prototype.acts.SetMirrored
 ];};
