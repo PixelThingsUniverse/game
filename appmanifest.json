@@ -1,9 +1,9 @@
 ﻿{
-	"name": "Ower Face",
-	"short_name": "Ower Face",
+	"name": "Pixel Things Universe  web",
+	"short_name": "Pixel Things Universe  web",
 	"start_url": "index.html",
 	"display": "fullscreen",
-	"orientation": "any",
+	"orientation": "landscape",
 	"icons": [{
 		"src": "icon-16.png",
 		"sizes": "16x16",
